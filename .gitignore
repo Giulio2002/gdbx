@@ -1,0 +1,20 @@
+CLAUDE.md
+gdbx_read
+tests.test
+libmdbx/
+mdbx-go/
+agent.sh
+agenst-log.txt
+ORCHESTRATOR.md
+*.txt
+*.prof
+
+# Large benchmark databases
+*.db
+**/bench_*.db
+**/test_*.db
+**/*_bench/
+**/*_test/
+**/chaindata/
+# Benchmark cache databases
+tests/testdata/benchdb/

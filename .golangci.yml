@@ -1,0 +1,104 @@
+run:
+  timeout: 5m
+  tests: true
+
+output:
+  formats:
+    - format: colored-line-number
+
+linters:
+  enable:
+    # Detect unused code
+    - unused
+
+    # Code quality
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - typecheck
+
+    # Style
+    - gofmt
+    - goimports
+
+    # Bugs
+    - bodyclose
+    - nilerr
+
+  disable:
+    - depguard
+
+linters-settings:
+  staticcheck:
+    checks:
+      - all
+      - "-SA1019" # Allow deprecated
+
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+    exclude-functions:
+      - (*os.File).Close
+      - (io.Closer).Close
+
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment
+
+  unused:
+    # These files contain helper/utility functions that may be used in the future
+    # or are part of the low-level API
+    local-variables-are-used: false
+
+issues:
+  exclude-dirs:
+    - mdbx-go
+    - libmdbx
+
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    # Exclude test files from errcheck
+    - path: _test\.go
+      linters:
+        - errcheck
+
+    # Exclude test directory from unused
+    - path: ^tests/
+      linters:
+        - errcheck
+
+    # Exclude low-level helper files from unused checker
+    # These contain utility functions that may be used in the future
+    - path: node\.go
+      linters:
+        - unused
+
+    - path: mmap_.*\.go
+      linters:
+        - unused
+
+    - path: search_.*\.go
+      linters:
+        - unused
+
+    - path: page\.go
+      linters:
+        - unused
+
+    - path: lock\.go
+      linters:
+        - unused
+
+    - path: meta\.go
+      linters:
+        - unused
+
+    # Exclude specific patterns that are intentionally unused (API compatibility)
+    - linters:
+        - unused
+      text: "globalLogger|globalSlowReadersHandler"
