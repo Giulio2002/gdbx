@@ -75,6 +75,34 @@ TEXT ·getKeyAndCompareAsm(SB), NOSPLIT, $0-64
     // Compare bytes: DI = nodeKey, R9 = searchKey, R11 = minLen
     MOVQ    R11, R12                     // R12 = bytes remaining
 
+    // SSE2 loop: compare 16 bytes at a time
+compare_sse_loop:
+    CMPQ    R12, $16
+    JL      compare_loop                 // Less than 16 bytes, use scalar
+
+    MOVOU   0(R9), X0                    // Load 16 bytes from searchKey
+    MOVOU   0(DI), X1                    // Load 16 bytes from nodeKey
+    PCMPEQB X1, X0                       // Compare bytes
+    PMOVMSKB X0, AX                      // Move byte mask to AX
+
+    CMPQ    AX, $0xFFFF                  // All 16 bytes equal?
+    JNE     compare_sse_diff             // Found a difference
+
+    ADDQ    $16, R9
+    ADDQ    $16, DI
+    SUBQ    $16, R12
+    JMP     compare_sse_loop
+
+compare_sse_diff:
+    // AX contains bitmask: bit i is 1 if byte i is equal
+    XORQ    $0xFFFF, AX                  // Invert: bit i is 1 if byte i differs
+    BSFQ    AX, AX                       // AX = index of first differing byte
+    MOVBLZX 0(R9)(AX*1), BX              // Load byte from searchKey
+    MOVBLZX 0(DI)(AX*1), R13             // Load byte from nodeKey
+    CMPB    BL, R13B
+    JB      return_neg1
+    JMP     return_pos1
+
 compare_loop:
     // Try to compare 8 bytes at a time
     CMPQ    R12, $8
@@ -139,6 +167,7 @@ return_pos1:
 
 // func compareKeysAsm(a, b []byte) int
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
+// Uses SSE2 SIMD for keys >= 16 bytes, scalar for smaller.
 TEXT ·compareKeysAsm(SB), NOSPLIT, $0-56
     MOVQ    a_base+0(FP), SI             // SI = a.ptr
     MOVQ    a_len+8(FP), AX              // AX = a.len
@@ -156,6 +185,36 @@ TEXT ·compareKeysAsm(SB), NOSPLIT, $0-56
 
     MOVQ    CX, R8                       // R8 = bytes remaining
 
+    // SSE2 loop: compare 16 bytes at a time
+cmp_sse_loop:
+    CMPQ    R8, $16
+    JL      cmp_loop                     // Less than 16 bytes, use scalar
+
+    MOVOU   0(SI), X0                    // Load 16 bytes from a
+    MOVOU   0(DI), X1                    // Load 16 bytes from b
+    PCMPEQB X1, X0                       // Compare bytes: 0xFF if equal, 0x00 if not
+    PMOVMSKB X0, R9                      // Move byte mask to R9
+
+    CMPQ    R9, $0xFFFF                  // All 16 bytes equal?
+    JNE     cmp_sse_diff                 // Found a difference
+
+    ADDQ    $16, SI
+    ADDQ    $16, DI
+    SUBQ    $16, R8
+    JMP     cmp_sse_loop
+
+cmp_sse_diff:
+    // R9 contains bitmask: bit i is 1 if byte i is equal
+    // Find first differing byte using BSF (bit scan forward)
+    XORQ    $0xFFFF, R9                  // Invert lower 16 bits: bit i is 1 if byte i differs
+    BSFQ    R9, R9                       // R9 = index of first differing byte
+    MOVBLZX 0(SI)(R9*1), R10             // Load byte from a
+    MOVBLZX 0(DI)(R9*1), R11             // Load byte from b
+    CMPB    R10B, R11B
+    JB      cmp_neg1
+    JMP     cmp_pos1
+
+    // Scalar loop: compare 8 bytes at a time
 cmp_loop:
     CMPQ    R8, $8
     JL      cmp_small
