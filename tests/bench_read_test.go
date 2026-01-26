@@ -45,6 +45,20 @@ func BenchmarkReadOps(b *testing.B) {
 		b.Run(fmt.Sprintf("RandGet_%s/rocksdb", sizeName), func(b *testing.B) {
 			benchRandGetRocksDBOp(b, size)
 		})
+
+		// Random Seek (cursor seek to key)
+		b.Run(fmt.Sprintf("RandSeek_%s/gdbx", sizeName), func(b *testing.B) {
+			benchRandSeekGdbxOp(b, size)
+		})
+		b.Run(fmt.Sprintf("RandSeek_%s/mdbx", sizeName), func(b *testing.B) {
+			benchRandSeekMdbxOp(b, size)
+		})
+		b.Run(fmt.Sprintf("RandSeek_%s/bolt", sizeName), func(b *testing.B) {
+			benchRandSeekBoltOp(b, size)
+		})
+		b.Run(fmt.Sprintf("RandSeek_%s/rocksdb", sizeName), func(b *testing.B) {
+			benchRandSeekRocksDBOp(b, size)
+		})
 	}
 }
 
@@ -314,5 +328,159 @@ func benchRandGetRocksDBOp(b *testing.B, numKeys int) {
 		if val != nil {
 			val.Free()
 		}
+	}
+}
+
+// ============ Random Seek (cursor seek to key, per-operation cost) ============
+
+func benchRandSeekGdbxOp(b *testing.B, numKeys int) {
+	genv, _, _ := getCachedPlainDB(b, numKeys)
+
+	txn, err := genv.BeginTxn(nil, gdbx.TxnReadOnly)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer txn.Abort()
+
+	dbi, err := txn.OpenDBISimple("bench", 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	cursor, err := txn.OpenCursor(dbi)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer cursor.Close()
+
+	key := make([]byte, 8)
+
+	// Pre-generate random order
+	order := make([]int, numKeys)
+	for i := range order {
+		order[i] = i
+	}
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(uint64(i*17+31) % uint64(i+1))
+		order[i], order[j] = order[j], order[i]
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(order[i%numKeys]))
+		cursor.Get(key, nil, gdbx.Set)
+	}
+}
+
+func benchRandSeekMdbxOp(b *testing.B, numKeys int) {
+	_, menv, _ := getCachedPlainDB(b, numKeys)
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	txn, err := menv.BeginTxn(nil, mdbxgo.Readonly)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer txn.Abort()
+
+	dbi, err := txn.OpenDBI("bench", 0, nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	cursor, err := txn.OpenCursor(dbi)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer cursor.Close()
+
+	key := make([]byte, 8)
+
+	// Pre-generate random order
+	order := make([]int, numKeys)
+	for i := range order {
+		order[i] = i
+	}
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(uint64(i*17+31) % uint64(i+1))
+		order[i], order[j] = order[j], order[i]
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(order[i%numKeys]))
+		cursor.Get(key, nil, mdbxgo.Set)
+	}
+}
+
+func benchRandSeekBoltOp(b *testing.B, numKeys int) {
+	db := getCachedBoltDB(b, numKeys)
+
+	tx, err := db.Begin(false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	bucket := tx.Bucket([]byte("bench"))
+	if bucket == nil {
+		b.Fatal("bucket not found")
+	}
+
+	cursor := bucket.Cursor()
+
+	key := make([]byte, 8)
+
+	// Pre-generate random order
+	order := make([]int, numKeys)
+	for i := range order {
+		order[i] = i
+	}
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(uint64(i*17+31) % uint64(i+1))
+		order[i], order[j] = order[j], order[i]
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(order[i%numKeys]))
+		cursor.Seek(key)
+	}
+}
+
+func benchRandSeekRocksDBOp(b *testing.B, numKeys int) {
+	db := getCachedRocksDB(b, numKeys)
+
+	ro := gorocksdb.NewDefaultReadOptions()
+	defer ro.Destroy()
+
+	iter := db.NewIterator(ro)
+	defer iter.Close()
+
+	key := make([]byte, 8)
+
+	// Pre-generate random order
+	order := make([]int, numKeys)
+	for i := range order {
+		order[i] = i
+	}
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(uint64(i*17+31) % uint64(i+1))
+		order[i], order[j] = order[j], order[i]
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(order[i%numKeys]))
+		iter.Seek(key)
 	}
 }
