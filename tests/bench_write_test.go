@@ -5,7 +5,15 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+
+	"github.com/tecbot/gorocksdb"
 )
+
+func newRocksWriteOpts() *gorocksdb.WriteOptions {
+	wo := gorocksdb.NewDefaultWriteOptions()
+	wo.DisableWAL(true) // Disable WAL for fair comparison (others don't sync either)
+	return wo
+}
 
 // BenchmarkWriteOps benchmarks write operations on pre-populated databases.
 // Opens transaction and DBI once, then measures pure Put performance.
@@ -25,6 +33,9 @@ func BenchmarkWriteOps(b *testing.B) {
 		b.Run(fmt.Sprintf("SeqPut_%s/bolt", sizeName), func(b *testing.B) {
 			benchSeqPutBolt(b, size)
 		})
+		b.Run(fmt.Sprintf("SeqPut_%s/rocksdb", sizeName), func(b *testing.B) {
+			benchSeqPutRocksDB(b, size)
+		})
 
 		// Random Put (updates to random existing keys)
 		b.Run(fmt.Sprintf("RandPut_%s/gdbx", sizeName), func(b *testing.B) {
@@ -36,6 +47,9 @@ func BenchmarkWriteOps(b *testing.B) {
 		b.Run(fmt.Sprintf("RandPut_%s/bolt", sizeName), func(b *testing.B) {
 			benchRandPutBolt(b, size)
 		})
+		b.Run(fmt.Sprintf("RandPut_%s/rocksdb", sizeName), func(b *testing.B) {
+			benchRandPutRocksDB(b, size)
+		})
 
 		// Cursor Put
 		b.Run(fmt.Sprintf("CursorPut_%s/gdbx", sizeName), func(b *testing.B) {
@@ -46,6 +60,9 @@ func BenchmarkWriteOps(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("CursorPut_%s/bolt", sizeName), func(b *testing.B) {
 			benchCursorPutBolt(b, size)
+		})
+		b.Run(fmt.Sprintf("CursorPut_%s/rocksdb", sizeName), func(b *testing.B) {
+			benchCursorPutRocksDB(b, size)
 		})
 	}
 }
@@ -377,5 +394,76 @@ func benchCursorPutBolt(b *testing.B, numKeys int) {
 		binary.BigEndian.PutUint64(val, uint64(i))
 		// BoltDB cursor doesn't support Put, using bucket.Put
 		bucket.Put(key, val)
+	}
+}
+
+// ============ RocksDB Benchmarks ============
+
+func benchSeqPutRocksDB(b *testing.B, numKeys int) {
+	db := getCachedRocksDB(b, numKeys)
+
+	wo := newRocksWriteOpts()
+	defer wo.Destroy()
+
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(i%numKeys))
+		binary.BigEndian.PutUint64(val, uint64(i))
+		db.Put(wo, key, val)
+	}
+}
+
+func benchRandPutRocksDB(b *testing.B, numKeys int) {
+	db := getCachedRocksDB(b, numKeys)
+
+	wo := newRocksWriteOpts()
+	defer wo.Destroy()
+
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	// Pre-generate random order
+	order := make([]int, numKeys)
+	for i := range order {
+		order[i] = i
+	}
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(uint64(i*17+31) % uint64(i+1))
+		order[i], order[j] = order[j], order[i]
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		j := order[i%numKeys]
+		binary.BigEndian.PutUint64(key, uint64(j))
+		binary.BigEndian.PutUint64(val, uint64(i))
+		db.Put(wo, key, val)
+	}
+}
+
+func benchCursorPutRocksDB(b *testing.B, numKeys int) {
+	db := getCachedRocksDB(b, numKeys)
+
+	wo := newRocksWriteOpts()
+	defer wo.Destroy()
+
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	// RocksDB doesn't have cursor-based Put, use regular Put
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(i%numKeys))
+		binary.BigEndian.PutUint64(val, uint64(i))
+		db.Put(wo, key, val)
 	}
 }
