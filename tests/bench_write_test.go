@@ -22,6 +22,9 @@ func BenchmarkWriteOps(b *testing.B) {
 		b.Run(fmt.Sprintf("SeqPut_%s/mdbx", sizeName), func(b *testing.B) {
 			benchSeqPutMdbx(b, size)
 		})
+		b.Run(fmt.Sprintf("SeqPut_%s/bolt", sizeName), func(b *testing.B) {
+			benchSeqPutBolt(b, size)
+		})
 
 		// Random Put (updates to random existing keys)
 		b.Run(fmt.Sprintf("RandPut_%s/gdbx", sizeName), func(b *testing.B) {
@@ -30,6 +33,9 @@ func BenchmarkWriteOps(b *testing.B) {
 		b.Run(fmt.Sprintf("RandPut_%s/mdbx", sizeName), func(b *testing.B) {
 			benchRandPutMdbx(b, size)
 		})
+		b.Run(fmt.Sprintf("RandPut_%s/bolt", sizeName), func(b *testing.B) {
+			benchRandPutBolt(b, size)
+		})
 
 		// Cursor Put
 		b.Run(fmt.Sprintf("CursorPut_%s/gdbx", sizeName), func(b *testing.B) {
@@ -37,6 +43,9 @@ func BenchmarkWriteOps(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("CursorPut_%s/mdbx", sizeName), func(b *testing.B) {
 			benchCursorPutMdbx(b, size)
+		})
+		b.Run(fmt.Sprintf("CursorPut_%s/bolt", sizeName), func(b *testing.B) {
+			benchCursorPutBolt(b, size)
 		})
 	}
 }
@@ -267,5 +276,106 @@ func benchCursorPutMdbx(b *testing.B, numKeys int) {
 		binary.BigEndian.PutUint64(key, uint64(i%numKeys))
 		binary.BigEndian.PutUint64(val, uint64(i))
 		cursor.Put(key, val, 0)
+	}
+}
+
+// ============ BoltDB Benchmarks ============
+
+func benchSeqPutBolt(b *testing.B, numKeys int) {
+	db := getCachedBoltDB(b, numKeys)
+
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	// Open write transaction once before timing
+	tx, err := db.Begin(true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	bucket := tx.Bucket([]byte("bench"))
+	if bucket == nil {
+		b.Fatal("bucket not found")
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(i%numKeys))
+		binary.BigEndian.PutUint64(val, uint64(i))
+		bucket.Put(key, val)
+	}
+}
+
+func benchRandPutBolt(b *testing.B, numKeys int) {
+	db := getCachedBoltDB(b, numKeys)
+
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	// Pre-generate random order
+	order := make([]int, numKeys)
+	for i := range order {
+		order[i] = i
+	}
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(uint64(i*17+31) % uint64(i+1))
+		order[i], order[j] = order[j], order[i]
+	}
+
+	// Open write transaction once before timing
+	tx, err := db.Begin(true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	bucket := tx.Bucket([]byte("bench"))
+	if bucket == nil {
+		b.Fatal("bucket not found")
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		j := order[i%numKeys]
+		binary.BigEndian.PutUint64(key, uint64(j))
+		binary.BigEndian.PutUint64(val, uint64(i))
+		bucket.Put(key, val)
+	}
+}
+
+func benchCursorPutBolt(b *testing.B, numKeys int) {
+	db := getCachedBoltDB(b, numKeys)
+
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	// Open write transaction once before timing
+	tx, err := db.Begin(true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	bucket := tx.Bucket([]byte("bench"))
+	if bucket == nil {
+		b.Fatal("bucket not found")
+	}
+
+	cursor := bucket.Cursor()
+	_ = cursor // BoltDB cursor doesn't have Put, use bucket.Put
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		binary.BigEndian.PutUint64(key, uint64(i%numKeys))
+		binary.BigEndian.PutUint64(val, uint64(i))
+		// BoltDB cursor doesn't support Put, using bucket.Put
+		bucket.Put(key, val)
 	}
 }

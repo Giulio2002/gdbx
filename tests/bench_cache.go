@@ -11,6 +11,7 @@ import (
 
 	"github.com/Giulio2002/gdbx"
 	mdbxgo "github.com/erigontech/mdbx-go/mdbx"
+	bolt "go.etcd.io/bbolt"
 )
 
 // Cached benchmark database directory
@@ -20,6 +21,7 @@ var (
 	cacheMu     sync.Mutex
 	gdbxEnvs    = make(map[string]*gdbx.Env)
 	mdbxEnvs    = make(map[string]*mdbxgo.Env)
+	boltDBs     = make(map[string]*bolt.DB)
 	sampleCache = make(map[string][][]byte)
 )
 
@@ -389,6 +391,106 @@ func collectSampleKeysCached(b *testing.B, env *gdbx.Env, tableName string, numK
 	return samples
 }
 
+// getCachedBoltDB returns a cached BoltDB database, creating it if needed.
+func getCachedBoltDB(b *testing.B, size int) *bolt.DB {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+
+	key := fmt.Sprintf("bolt_%d", size)
+	boltPath := filepath.Join(benchCacheDir, fmt.Sprintf("plain_%d_bolt.db", size))
+
+	// Check if already loaded in memory
+	if db, ok := boltDBs[key]; ok {
+		return db
+	}
+
+	// Ensure cache directory exists
+	if err := os.MkdirAll(benchCacheDir, 0755); err != nil {
+		b.Fatal(err)
+	}
+
+	// Check if database exists on disk
+	boltExists := fileExists(boltPath)
+
+	// Setup BoltDB
+	db, err := bolt.Open(boltPath, 0644, &bolt.Options{
+		NoSync:         true,
+		NoFreelistSync: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Populate if needed
+	if !boltExists {
+		b.Logf("Creating cached BoltDB with %d keys...", size)
+		populateBoltDBCached(b, db, size)
+	} else {
+		b.Logf("Using cached BoltDB with %d keys", size)
+	}
+
+	// Cache in memory
+	boltDBs[key] = db
+
+	return db
+}
+
+func populateBoltDBCached(b *testing.B, db *bolt.DB, numKeys int) {
+	batchSize := 100_000
+	key := make([]byte, 8)
+	val := make([]byte, 32)
+
+	err := db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("bench"))
+		if err != nil {
+			return err
+		}
+
+		for i := 0; i < numKeys; i++ {
+			binary.BigEndian.PutUint64(key, uint64(i))
+			binary.BigEndian.PutUint64(val, uint64(i))
+
+			if err := bucket.Put(key, val); err != nil {
+				return err
+			}
+
+			// Commit in batches
+			if (i+1)%batchSize == 0 && i+1 < numKeys {
+				return nil // Will be called again
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Handle remaining batches
+	written := batchSize
+	for written < numKeys {
+		batchEnd := written + batchSize
+		if batchEnd > numKeys {
+			batchEnd = numKeys
+		}
+
+		err := db.Update(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket([]byte("bench"))
+			for i := written; i < batchEnd; i++ {
+				binary.BigEndian.PutUint64(key, uint64(i))
+				binary.BigEndian.PutUint64(val, uint64(i))
+				if err := bucket.Put(key, val); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		written = batchEnd
+	}
+}
+
 // CleanupBenchCache closes all cached environments.
 // Call this in TestMain or after benchmarks complete.
 func CleanupBenchCache() {
@@ -401,8 +503,12 @@ func CleanupBenchCache() {
 	for _, env := range mdbxEnvs {
 		env.Close()
 	}
+	for _, db := range boltDBs {
+		db.Close()
+	}
 	gdbxEnvs = make(map[string]*gdbx.Env)
 	mdbxEnvs = make(map[string]*mdbxgo.Env)
+	boltDBs = make(map[string]*bolt.DB)
 	sampleCache = make(map[string][][]byte)
 }
 
