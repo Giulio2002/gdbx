@@ -86,7 +86,12 @@ func (c *Cursor) put(key, value []byte, flags uint) error {
 				if uint32(len(value)) != oldSize {
 					return c.updateBigNodeSize(uint32(len(value)))
 				}
-				// Same size - just mark tree dirty and we're done
+				// Same size - still need to touch leaf page to update its txnid
+				// This ensures overflow pages (txnid=N) are not newer than leaf page (txnid=N)
+				// which is required for MDBX MVCC consistency
+				if _, err := c.touchPage(); err != nil {
+					return err
+				}
 				c.markTreeDirty()
 				return nil
 			}
@@ -450,7 +455,12 @@ func (c *Cursor) putAfterPosition(key, value []byte, flags uint, exact, isDupSor
 				if uint32(len(value)) != oldSize {
 					return c.updateBigNodeSize(uint32(len(value)))
 				}
-				// Same size - just mark tree dirty and we're done
+				// Same size - still need to touch leaf page to update its txnid
+				// This ensures overflow pages (txnid=N) are not newer than leaf page (txnid=N)
+				// which is required for MDBX MVCC consistency
+				if _, err := c.touchPage(); err != nil {
+					return err
+				}
 				c.markTreeDirty()
 				return nil
 			}

@@ -5,9 +5,24 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
 )
+
+// sysPageSize is the system's memory page size, cached at init time.
+// This is used to align database file sizes for mdbx read-only compatibility.
+var sysPageSize = int64(syscall.Getpagesize())
+
+// alignToSysPageSize rounds up a size to be aligned to the system page size.
+// This is required for mdbx compatibility - mdbx rejects databases with file
+// sizes not aligned to the system page size when opening in read-only mode.
+func alignToSysPageSize(size int64) int64 {
+	if size%sysPageSize == 0 {
+		return size
+	}
+	return ((size / sysPageSize) + 1) * sysPageSize
+}
 
 // envSignature is the magic number for valid environments
 const envSignature uint32 = 0x454E5658 // "ENVX"
@@ -219,6 +234,9 @@ func (e *Env) initNewDB() error {
 	if initialSize < minSize {
 		initialSize = minSize
 	}
+
+	// Align to system page size for mdbx read-only compatibility
+	initialSize = alignToSysPageSize(initialSize)
 
 	// Extend file to initial geometry size
 	if err := e.dataFile.Truncate(initialSize); err != nil {
@@ -1361,6 +1379,9 @@ func (e *Env) extendMmap(needPgno pgno) bool {
 	}
 	newSize := ((neededSize + growStep - 1) / growStep) * growStep
 
+	// Align to system page size for mdbx read-only compatibility
+	newSize = alignToSysPageSize(newSize)
+
 	// Cap at upper limit
 	if e.geoUpper > 0 && uint64(newSize) > e.geoUpper {
 		newSize = int64(e.geoUpper)
@@ -1406,6 +1427,9 @@ func (e *Env) PreExtendMmap(size int64) error {
 	if size <= currentSize {
 		return nil // Already large enough
 	}
+
+	// Align to system page size for mdbx read-only compatibility
+	size = alignToSysPageSize(size)
 
 	// Cap at upper limit
 	if e.geoUpper > 0 && uint64(size) > e.geoUpper {

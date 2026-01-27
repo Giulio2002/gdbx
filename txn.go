@@ -1692,6 +1692,9 @@ func (txn *Txn) writeDirtyPages() error {
 	// Calculate required file size
 	requiredSize := int64(txn.allocatedPg) * pageSize
 
+	// Align to system page size for mdbx read-only compatibility
+	requiredSize = alignToSysPageSize(requiredSize)
+
 	// Get current mmap size (avoids syscall)
 	currentSize := txn.env.dataMap.size
 
@@ -1806,8 +1809,31 @@ func (txn *Txn) updateMeta() error {
 	meta.setTxnid(txn.txnID)
 	meta.GCTree = txn.trees[FreeDBI]
 	meta.MainTree = txn.trees[MainDBI]
-	meta.Geometry.Now = txn.allocatedPg
-	meta.Geometry.Next = txn.allocatedPg // Next page to allocate
+
+	// geometry.now must represent a page count that, when multiplied by pageSize,
+	// is aligned to the system page size. This is required for mdbx compatibility.
+	// On Apple Silicon (16KB OS pages) with 4KB DB pages, this means geometry.now
+	// must be a multiple of 4.
+	alignedFileSize := alignToSysPageSize(int64(txn.allocatedPg) * int64(pageSize))
+	alignedPgCount := pgno(alignedFileSize / int64(pageSize))
+	meta.Geometry.Now = alignedPgCount
+	meta.Geometry.Next = alignedPgCount // Next page to allocate
+
+	// Determine if we will sync - this affects the meta signature
+	noSync := txn.flags&uint32(TxnNoSync) != 0
+	noMetaSync := txn.env.flags&NoMetaSync != 0
+	willSync := !noSync && !noMetaSync
+
+	// Set sign based on whether we will sync:
+	// - Steady (0xFFFFFFFFFFFFFFFF) if syncing
+	// - Weak (1) if not syncing
+	// This is critical for libmdbx compatibility - it checks the sign
+	// to determine if recovery is needed when opening read-only.
+	if willSync {
+		meta.setSignSteady()
+	} else {
+		meta.setSignWeak()
+	}
 
 	// Two-phase update: set txnid_b to 0 first
 	meta.beginMetaUpdate(txn.txnID)
@@ -1826,10 +1852,8 @@ func (txn *Txn) updateMeta() error {
 		return WrapError(ErrProblem, err)
 	}
 
-	// Single sync after all writes complete (unless NoSync mode)
-	noSync := txn.flags&uint32(TxnNoSync) != 0
-	noMetaSync := txn.env.flags&NoMetaSync != 0
-	if !noSync && !noMetaSync {
+	// Sync if needed
+	if willSync {
 		if err := txn.env.dataFile.Sync(); err != nil {
 			return WrapError(ErrProblem, err)
 		}

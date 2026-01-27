@@ -152,6 +152,24 @@ func (m *meta) isSteady() bool {
 	return !m.isWeak()
 }
 
+// Data signature constants matching libmdbx
+const (
+	datasignWeak   = 1                    // DATASIGN_WEAK: not synced to disk
+	datasignSteady = 0xFFFFFFFFFFFFFFFF   // ~DATASIGN_NONE: synced to disk
+)
+
+// setSignWeak marks the meta as weak (not synced).
+func (m *meta) setSignWeak() {
+	m.Sign[0] = uint32(datasignWeak)
+	m.Sign[1] = uint32(datasignWeak >> 32)
+}
+
+// setSignSteady marks the meta as steady (synced).
+func (m *meta) setSignSteady() {
+	m.Sign[0] = 0xFFFFFFFF
+	m.Sign[1] = 0xFFFFFFFF
+}
+
 // pageSize returns the database page size.
 // In MDBX v3, the page size is stored in the GC tree's DupfixSize field
 // (which serves as a pagesize field in this context).
@@ -378,10 +396,10 @@ func initMeta(m *meta, pageSize uint32, tid txnid) {
 	m.GCTree.Root = invalidPgno
 	m.MainTree.Root = invalidPgno
 
-	// Set sign to DATASIGN_NONE (all 0xFF) to skip checksum validation
-	// DATASIGN_NONE = -1 = 0xFFFFFFFFFFFFFFFF
-	m.Sign[0] = 0xFFFFFFFF
-	m.Sign[1] = 0xFFFFFFFF
+	// Set sign to steady (0xFFFFFFFFFFFFFFFF).
+	// In libmdbx: DATASIGN_NONE=0, DATASIGN_WEAK=1, anything > 1 is steady.
+	// New databases are synced on init, so they start as steady.
+	m.setSignSteady()
 
 	// Generate random boot ID
 	rand.Read(m.BootID[:])

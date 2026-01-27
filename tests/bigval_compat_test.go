@@ -187,14 +187,14 @@ func testBigValueCompatibility(t *testing.T, valueSize int) {
 	t.Run("GdbxWriteMdbxRead", func(t *testing.T) {
 		sharedPath := filepath.Join(tmpDir, "shared.db")
 
-		// Write with gdbx
+		// Write with gdbx - don't use WriteMap or NoMetaSync for cross-compatibility
 		genv, err := gdbx.NewEnv(gdbx.Default)
 		if err != nil {
 			t.Fatal(err)
 		}
 		genv.SetMaxDBs(10)
 		genv.SetGeometry(-1, -1, mapSize, -1, -1, 4096)
-		if err := genv.Open(sharedPath, gdbx.NoSubdir|gdbx.NoMetaSync|gdbx.WriteMap, 0644); err != nil {
+		if err := genv.Open(sharedPath, gdbx.NoSubdir, 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -335,7 +335,7 @@ func testBigValueCompatibility(t *testing.T, valueSize int) {
 	t.Run("RepeatedUpdates", func(t *testing.T) {
 		sharedPath := filepath.Join(tmpDir, "updates.db")
 
-		// Open gdbx
+		// Open gdbx - don't use WriteMap or NoMetaSync for cross-compatibility
 		genv, err := gdbx.NewEnv(gdbx.Default)
 		if err != nil {
 			t.Fatal(err)
@@ -343,7 +343,7 @@ func testBigValueCompatibility(t *testing.T, valueSize int) {
 		defer genv.Close()
 		genv.SetMaxDBs(10)
 		genv.SetGeometry(-1, -1, mapSize, -1, -1, 4096)
-		if err := genv.Open(sharedPath, gdbx.NoSubdir|gdbx.NoMetaSync|gdbx.WriteMap, 0644); err != nil {
+		if err := genv.Open(sharedPath, gdbx.NoSubdir, 0644); err != nil {
 			t.Fatal(err)
 		}
 

@@ -1,4 +1,4 @@
-package tests
+package benchmarks
 
 import (
 	"crypto/rand"
