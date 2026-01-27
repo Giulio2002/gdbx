@@ -1733,8 +1733,38 @@ func (txn *Txn) writeDirtyPages() error {
 		}
 	}
 
-	// Write all dirty pages
+	// WriteMap fast path: if all dirty pages are in mmap, nothing to do
 	useWriteMap := txn.env.flags&WriteMap != 0 && txn.env.dataMap != nil
+	if useWriteMap {
+		// Check if any pages need copying (allocated outside mmap)
+		mmapData := txn.env.dataMap.data
+		mmapLen := int64(len(mmapData))
+		needsCopy := false
+
+		txn.dirtyTracker.forEach(func(pn pgno, p *page) {
+			if needsCopy {
+				return
+			}
+			offset := int64(pn) * pageSize
+			end := offset + int64(len(p.Data))
+			if end > mmapLen {
+				needsCopy = true
+				return
+			}
+			// Check if p.Data is NOT in mmap (different backing array)
+			mmapSlice := mmapData[offset:end]
+			if &p.Data[0] != &mmapSlice[0] {
+				needsCopy = true
+			}
+		})
+
+		// Fast path: all pages are in mmap, nothing to write
+		if !needsCopy {
+			return nil
+		}
+	}
+
+	// Write dirty pages that need writing
 	var writeErr error
 
 	txn.dirtyTracker.forEach(func(pn pgno, p *page) {
@@ -1776,24 +1806,93 @@ func (txn *Txn) updateMeta() error {
 	metaIdx := txn.env.meta.Load().nextMetaIndex()
 	pageSize := txn.env.pageSize
 
-	// Get meta page buffer from pool
+	// Determine if we will sync - this affects the meta signature
+	noSync := txn.flags&uint32(TxnNoSync) != 0
+	noMetaSync := txn.env.flags&NoMetaSync != 0
+	willSync := !noSync && !noMetaSync
+
+	// WriteMap fast path: write directly to mmap (avoids WriteAt syscalls)
+	useWriteMap := txn.env.flags&WriteMap != 0 && txn.env.dataMap != nil
+	if useWriteMap {
+		mmapData := txn.env.dataMap.data
+		offset := int(metaIdx) * int(pageSize)
+		end := offset + int(pageSize)
+
+		if end <= len(mmapData) {
+			// Write directly to mmap
+			metaPage := mmapData[offset:end]
+
+			// Write page header at offset 0
+			pageHdr := (*pageHeader)(unsafe.Pointer(&metaPage[0]))
+			pageHdr.PageNo = pgno(metaIdx)
+			pageHdr.Flags = pageMeta
+			pageHdr.Txnid = 0
+
+			// Meta content starts after page header (offset 20)
+			meta := (*meta)(unsafe.Pointer(&metaPage[pageHeaderSize]))
+
+			// Copy from recent meta
+			recentMeta := txn.env.meta.Load().recentMeta()
+			if recentMeta == nil {
+				return NewError(ErrCorrupted)
+			}
+			*meta = *recentMeta
+
+			// Update with transaction changes
+			meta.setTxnid(txn.txnID)
+			meta.GCTree = txn.trees[FreeDBI]
+			meta.MainTree = txn.trees[MainDBI]
+
+			alignedFileSize := alignToSysPageSize(int64(txn.allocatedPg) * int64(pageSize))
+			alignedPgCount := pgno(alignedFileSize / int64(pageSize))
+			meta.Geometry.Now = alignedPgCount
+			meta.Geometry.Next = alignedPgCount
+
+			if willSync {
+				meta.setSignSteady()
+			} else {
+				meta.setSignWeak()
+			}
+
+			// Two-phase update directly in mmap
+			meta.beginMetaUpdate(txn.txnID)
+			meta.endMetaUpdate(txn.txnID)
+
+			// Sync if needed
+			if willSync {
+				if err := txn.env.dataFile.Sync(); err != nil {
+					return WrapError(ErrProblem, err)
+				}
+			}
+
+			// Update environment's meta from mmap
+			txn.env.mu.Lock()
+			err := txn.env.readMeta()
+			txn.env.mu.Unlock()
+			if err != nil {
+				return err
+			}
+
+			return nil
+		}
+	}
+
+	// Standard path: use pooled buffer and WriteAt
 	metaPageIface := metaPagePool.Get()
 	metaPage := metaPageIface.([]byte)
 	if len(metaPage) < int(pageSize) {
 		metaPage = make([]byte, pageSize)
 	} else {
 		metaPage = metaPage[:pageSize]
-		// Clear the buffer (clear uses optimized memclr)
 		clear(metaPage)
 	}
 	defer metaPagePool.Put(metaPage)
 
 	// Write page header at offset 0
-	// Meta page headers have txnid=0 (the actual txnid is in the meta body)
 	pageHdr := (*pageHeader)(unsafe.Pointer(&metaPage[0]))
 	pageHdr.PageNo = pgno(metaIdx)
 	pageHdr.Flags = pageMeta
-	pageHdr.Txnid = 0 // Meta pages use txnid from meta body, not page header
+	pageHdr.Txnid = 0
 
 	// Meta content starts after page header (offset 20)
 	meta := (*meta)(unsafe.Pointer(&metaPage[pageHeaderSize]))
@@ -1810,25 +1909,11 @@ func (txn *Txn) updateMeta() error {
 	meta.GCTree = txn.trees[FreeDBI]
 	meta.MainTree = txn.trees[MainDBI]
 
-	// geometry.now must represent a page count that, when multiplied by pageSize,
-	// is aligned to the system page size. This is required for mdbx compatibility.
-	// On Apple Silicon (16KB OS pages) with 4KB DB pages, this means geometry.now
-	// must be a multiple of 4.
 	alignedFileSize := alignToSysPageSize(int64(txn.allocatedPg) * int64(pageSize))
 	alignedPgCount := pgno(alignedFileSize / int64(pageSize))
 	meta.Geometry.Now = alignedPgCount
-	meta.Geometry.Next = alignedPgCount // Next page to allocate
+	meta.Geometry.Next = alignedPgCount
 
-	// Determine if we will sync - this affects the meta signature
-	noSync := txn.flags&uint32(TxnNoSync) != 0
-	noMetaSync := txn.env.flags&NoMetaSync != 0
-	willSync := !noSync && !noMetaSync
-
-	// Set sign based on whether we will sync:
-	// - Steady (0xFFFFFFFFFFFFFFFF) if syncing
-	// - Weak (1) if not syncing
-	// This is critical for libmdbx compatibility - it checks the sign
-	// to determine if recovery is needed when opening read-only.
 	if willSync {
 		meta.setSignSteady()
 	} else {
@@ -1860,9 +1945,6 @@ func (txn *Txn) updateMeta() error {
 	}
 
 	// Update environment's meta from the current mmap
-	// (writeDirtyPages already handles remapping when file grows)
-	// Hold write lock to prevent readers from seeing intermediate state
-	// where mt.recent is -1 during updateFromPages
 	txn.env.mu.Lock()
 	err := txn.env.readMeta()
 	txn.env.mu.Unlock()
