@@ -229,6 +229,11 @@ var NotFound = errors.New("key not found")
 
 // IsNotFound returns true if the error is ErrNotFound
 func IsNotFound(err error) bool {
+	// Fast path: direct pointer comparison with global sentinel
+	if err == ErrNotFoundError {
+		return true
+	}
+	// Slow path: check wrapped errors
 	var e *Error
 	if errors.As(err, &e) {
 		return e.Code == ErrNotFound
@@ -238,6 +243,11 @@ func IsNotFound(err error) bool {
 
 // IsKeyExist returns true if the error is ErrKeyExist
 func IsKeyExist(err error) bool {
+	// Fast path: direct pointer comparison with global sentinel
+	if err == ErrKeyExistError {
+		return true
+	}
+	// Slow path: check wrapped errors
 	var e *Error
 	if errors.As(err, &e) {
 		return e.Code == ErrKeyExist
