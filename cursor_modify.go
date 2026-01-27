@@ -679,7 +679,16 @@ func (c *Cursor) convertToDupSubPage(p *page, idx int, key, newValue []byte) err
 	}
 
 	// Build sub-page with two values
-	subPageData := c.buildDupSubPage([][]byte{val1, val2})
+	values := [][]byte{val1, val2}
+	subPageData := c.buildDupSubPage(values)
+
+	// Check total node size (header + key + subpage data) against leaf_nodemax
+	// This ensures the node will actually fit on a page
+	totalNodeSize := nodeSize + len(key) + len(subPageData)
+	if totalNodeSize > c.txn.env.LeafNodeMax() {
+		// Node too large for inline sub-page, convert directly to sub-tree
+		return c.convertToSubTree(p, idx, key, values)
+	}
 
 	// Build new node with Dup flag
 	nodeData := c.buildDupNode(key, subPageData)
@@ -740,9 +749,10 @@ func (c *Cursor) putDupSubPage(p *page, idx int, key, value []byte) error {
 
 	// Check if we need to convert to sub-tree
 	subPageData := c.buildDupSubPage(newValues)
-	// Use proper subpage_limit like libmdbx: leaf_nodemax - 8
-	subPageLimit := c.txn.env.SubPageLimit()
-	if len(subPageData) > subPageLimit {
+	// Check total node size (header + key + subpage data) against leaf_nodemax
+	// This ensures the node will actually fit on a page
+	totalNodeSize := nodeSize + len(key) + len(subPageData)
+	if totalNodeSize > c.txn.env.LeafNodeMax() {
 		// Convert to sub-tree
 		return c.convertToSubTree(p, idx, key, newValues)
 	}
@@ -1499,7 +1509,8 @@ func (c *Cursor) splitAndInsert(p *page, idx int, nodeData []byte, overflowPgno 
 	p.compactWithBuf(c.txn.compactBuf[:])
 
 	// Insert the new node in the appropriate page
-	if idx < splitIdx {
+	// Special case: when splitIdx=0, new node goes to left page alone (all existing went right)
+	if splitIdx == 0 || idx < splitIdx {
 		if !p.insertEntryWithBuf(idx, nodeData, c.txn.compactBuf[:]) {
 			// Shouldn't happen after split
 			return NewError(ErrPageFull)
@@ -2165,6 +2176,7 @@ func (c *Cursor) convertDupToSingle(p *page, idx int, key, value []byte) error {
 }
 
 // replaceNodeAt replaces the node at the given index with new node data.
+// If the page doesn't have space after removal, triggers a page split.
 func (c *Cursor) replaceNodeAt(p *page, idx int, newNodeData []byte) error {
 	// Get old node size
 	oldOffset := p.entryOffset(idx)
@@ -2193,13 +2205,15 @@ func (c *Cursor) replaceNodeAt(p *page, idx int, newNodeData []byte) error {
 	}
 
 	// Now insert the new entry
-	if !p.insertEntry(idx, newNodeData) {
-		// Page is full - this shouldn't happen for a smaller replacement
-		// but could happen if the sub-page grew
-		return ErrPageFullError
+	if p.insertEntry(idx, newNodeData) {
+		return nil
 	}
 
-	return nil
+	// Page is full after removal - need to split
+	// This can happen if the node grew (e.g., sub-tree metadata expanded)
+	// Use insertNodeAt which handles splitting properly
+	// Pass isUpdate=true since we're replacing an existing key
+	return c.insertNodeAt(p, idx, newNodeData, 0, true)
 }
 
 // touchPage returns a dirty (writable) copy of the current page.

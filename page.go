@@ -715,7 +715,13 @@ func (p *page) splitPoint(newNodeSize int, insertIdx int) int {
 		rightEntries := numEntries - splitIdx
 
 		// Add new node to appropriate side
-		if insertIdx < splitIdx {
+		// Special case: when splitIdx=0, new node goes left (alone) and all existing go right
+		// Special case: when splitIdx=numEntries, all existing go left and new node goes right (alone)
+		if splitIdx == 0 {
+			// New node alone on left
+			leftEntries = 1
+			leftDataSize = newNodeSize
+		} else if insertIdx < splitIdx {
 			leftEntries++
 			leftDataSize += newNodeSize
 		} else {
