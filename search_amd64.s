@@ -484,3 +484,404 @@ branch8_return_last:
 branch8_fallback:
     MOVQ    $-1, ret+40(FP)
     RET
+
+// func binarySearchLeafN(pageData []byte, key []byte, n int) int
+// Binary search on leaf page for variable-length keys using SSE2.
+// Page layout: header(20) + entries[n*2] + nodes
+// Node layout: dataSize(4) + flags(1) + pad(1) + keySize(2) + key(keyLen)
+//
+// Arguments:
+//   pageData: slice at FP+0 (ptr, len, cap = 24 bytes)
+//   key: slice at FP+24 (ptr, len, cap = 24 bytes)
+//   n: int at FP+48 (8 bytes)
+// Return: int at FP+56 (8 bytes)
+TEXT ·binarySearchLeafN(SB), NOSPLIT, $0-64
+    MOVQ    pageData_base+0(FP), SI      // SI = page data pointer
+    MOVQ    key_base+24(FP), R8          // R8 = search key pointer
+    MOVQ    key_len+32(FP), R9           // R9 = search key length
+    MOVQ    n+48(FP), CX                 // CX = number of entries
+
+    // If n <= 0, return 0
+    TESTQ   CX, CX
+    JLE     leafN_return_zero
+
+    // Fast path: check last entry first (append optimization)
+    MOVQ    CX, R10
+    DECQ    R10                          // R10 = n-1 (last index)
+
+    // Get entry offset for last entry: offset = data[20 + (n-1)*2]
+    LEAQ    20(SI)(R10*2), DI            // DI = &data[20 + (n-1)*2]
+    MOVWLZX 0(DI), AX                    // AX = stored offset
+    ADDQ    $20, AX                      // AX = actual node offset
+
+    // Get key info: keySize = data[offset+6], key starts at offset+8
+    LEAQ    (SI)(AX*1), DI               // DI = node pointer
+    MOVWLZX 6(DI), R11                   // R11 = nodeKeySize
+    ADDQ    $8, DI                       // DI = nodeKey pointer
+
+    // Compare search key with last node key
+    // Call inline comparison: result in AX (-1, 0, 1)
+    // R8 = searchKey, R9 = searchKeyLen, DI = nodeKey, R11 = nodeKeyLen
+    MOVQ    R9, R12                      // R12 = searchKeyLen
+    CMPQ    R11, R12
+    CMOVQLT R11, R12                     // R12 = min(searchKeyLen, nodeKeyLen)
+
+    // Compare bytes
+    MOVQ    R8, R13                      // R13 = searchKey ptr (preserve R8)
+    MOVQ    R12, R14                     // R14 = bytes remaining
+
+leafN_last_cmp_loop:
+    CMPQ    R14, $16
+    JL      leafN_last_cmp_small
+
+    MOVOU   0(R13), X0                   // Load 16 bytes from searchKey
+    MOVOU   0(DI), X1                    // Load 16 bytes from nodeKey
+    PCMPEQB X1, X0
+    PMOVMSKB X0, R15
+
+    CMPQ    R15, $0xFFFF
+    JNE     leafN_last_found_diff
+
+    ADDQ    $16, R13
+    ADDQ    $16, DI
+    SUBQ    $16, R14
+    JMP     leafN_last_cmp_loop
+
+leafN_last_cmp_small:
+    TESTQ   R14, R14
+    JZ      leafN_last_cmp_lengths
+
+leafN_last_cmp_byte:
+    MOVBLZX 0(R13), AX
+    MOVBLZX 0(DI), BX
+    CMPB    AL, BL
+    JNE     leafN_last_diff_byte
+    INCQ    R13
+    INCQ    DI
+    DECQ    R14
+    JNZ     leafN_last_cmp_byte
+
+leafN_last_cmp_lengths:
+    // Bytes equal up to minLen, compare lengths
+    CMPQ    R9, R11                      // searchKeyLen vs nodeKeyLen
+    JL      leafN_last_less              // searchKey < nodeKey
+    JG      leafN_last_greater           // searchKey > nodeKey
+    // Equal: return n-1
+    MOVQ    R10, ret+56(FP)
+    RET
+
+leafN_last_found_diff:
+    XORQ    $0xFFFF, R15
+    BSFQ    R15, R15
+    MOVBLZX 0(R13)(R15*1), AX
+    MOVBLZX 0(DI)(R15*1), BX
+    CMPB    AL, BL
+    JB      leafN_last_less
+    JMP     leafN_last_greater
+
+leafN_last_diff_byte:
+    JB      leafN_last_less
+    JMP     leafN_last_greater
+
+leafN_last_greater:
+    // searchKey > last: return n (insert after)
+    MOVQ    CX, ret+56(FP)
+    RET
+
+leafN_last_less:
+    // searchKey < last: do binary search from 0 to n-2
+    XORQ    AX, AX                       // low = 0
+    MOVQ    R10, BX
+    DECQ    BX                           // high = n-2
+
+leafN_loop:
+    CMPQ    AX, BX                       // low <= high?
+    JG      leafN_done
+
+    // mid = (low + high) / 2
+    MOVQ    AX, R10
+    ADDQ    BX, R10
+    SHRQ    $1, R10                      // R10 = mid
+
+    // Get entry offset for mid
+    LEAQ    20(SI)(R10*2), DI
+    MOVWLZX 0(DI), R11
+    ADDQ    $20, R11
+
+    // Get key info
+    LEAQ    (SI)(R11*1), DI              // DI = node pointer
+    MOVWLZX 6(DI), R11                   // R11 = nodeKeyLen
+    ADDQ    $8, DI                       // DI = nodeKey pointer
+
+    // Compare: R8 = searchKey, R9 = searchKeyLen, DI = nodeKey, R11 = nodeKeyLen
+    MOVQ    R9, R12
+    CMPQ    R11, R12
+    CMOVQLT R11, R12                     // R12 = min
+
+    MOVQ    R8, R13                      // R13 = searchKey ptr
+    MOVQ    R12, R14                     // R14 = bytes remaining
+
+leafN_mid_cmp_loop:
+    CMPQ    R14, $16
+    JL      leafN_mid_cmp_small
+
+    MOVOU   0(R13), X0
+    MOVOU   0(DI), X1
+    PCMPEQB X1, X0
+    PMOVMSKB X0, R15
+
+    CMPQ    R15, $0xFFFF
+    JNE     leafN_mid_found_diff
+
+    ADDQ    $16, R13
+    ADDQ    $16, DI
+    SUBQ    $16, R14
+    JMP     leafN_mid_cmp_loop
+
+leafN_mid_cmp_small:
+    TESTQ   R14, R14
+    JZ      leafN_mid_cmp_lengths
+
+leafN_mid_cmp_byte:
+    MOVBLZX 0(R13), R15
+    MOVBLZX 0(DI), R12
+    CMPB    R15B, R12B
+    JNE     leafN_mid_diff_byte
+    INCQ    R13
+    INCQ    DI
+    DECQ    R14
+    JNZ     leafN_mid_cmp_byte
+
+leafN_mid_cmp_lengths:
+    CMPQ    R9, R11
+    JL      leafN_go_left
+    JG      leafN_go_right
+    // Equal: return mid
+    MOVQ    R10, ret+56(FP)
+    RET
+
+leafN_mid_found_diff:
+    XORQ    $0xFFFF, R15
+    BSFQ    R15, R15
+    MOVBLZX 0(R13)(R15*1), R12
+    MOVBLZX 0(DI)(R15*1), R14
+    CMPB    R12B, R14B
+    JB      leafN_go_left
+    JMP     leafN_go_right
+
+leafN_mid_diff_byte:
+    JB      leafN_go_left
+    JMP     leafN_go_right
+
+leafN_go_left:
+    MOVQ    R10, BX
+    DECQ    BX                           // high = mid - 1
+    JMP     leafN_loop
+
+leafN_go_right:
+    MOVQ    R10, AX
+    INCQ    AX                           // low = mid + 1
+    JMP     leafN_loop
+
+leafN_done:
+    MOVQ    AX, ret+56(FP)
+    RET
+
+leafN_return_zero:
+    MOVQ    $0, ret+56(FP)
+    RET
+
+// func binarySearchBranchN(pageData []byte, key []byte, n int) int
+// Binary search on branch page for variable-length keys using SSE2.
+// Branch pages: entry 0 has no key (leftmost child), search entries 1 to n-1.
+TEXT ·binarySearchBranchN(SB), NOSPLIT, $0-64
+    MOVQ    pageData_base+0(FP), SI      // SI = page data pointer
+    MOVQ    key_base+24(FP), R8          // R8 = search key pointer
+    MOVQ    key_len+32(FP), R9           // R9 = search key length
+    MOVQ    n+48(FP), CX                 // CX = number of entries
+
+    // If n <= 1, return 0 (only leftmost child)
+    CMPQ    CX, $1
+    JLE     branchN_return_zero
+
+    // Fast path: check last entry first
+    MOVQ    CX, R10
+    DECQ    R10                          // R10 = n-1 (last index)
+
+    // Get entry offset for last entry
+    LEAQ    20(SI)(R10*2), DI
+    MOVWLZX 0(DI), AX
+    ADDQ    $20, AX
+
+    // Get key info
+    LEAQ    (SI)(AX*1), DI               // DI = node pointer
+    MOVWLZX 6(DI), R11                   // R11 = nodeKeyLen
+    ADDQ    $8, DI                       // DI = nodeKey pointer
+
+    // Compare search key with last node key
+    MOVQ    R9, R12
+    CMPQ    R11, R12
+    CMOVQLT R11, R12                     // R12 = min
+
+    MOVQ    R8, R13                      // R13 = searchKey ptr
+    MOVQ    R12, R14                     // R14 = bytes remaining
+
+branchN_last_cmp_loop:
+    CMPQ    R14, $16
+    JL      branchN_last_cmp_small
+
+    MOVOU   0(R13), X0
+    MOVOU   0(DI), X1
+    PCMPEQB X1, X0
+    PMOVMSKB X0, R15
+
+    CMPQ    R15, $0xFFFF
+    JNE     branchN_last_found_diff
+
+    ADDQ    $16, R13
+    ADDQ    $16, DI
+    SUBQ    $16, R14
+    JMP     branchN_last_cmp_loop
+
+branchN_last_cmp_small:
+    TESTQ   R14, R14
+    JZ      branchN_last_cmp_lengths
+
+branchN_last_cmp_byte:
+    MOVBLZX 0(R13), AX
+    MOVBLZX 0(DI), BX
+    CMPB    AL, BL
+    JNE     branchN_last_diff_byte
+    INCQ    R13
+    INCQ    DI
+    DECQ    R14
+    JNZ     branchN_last_cmp_byte
+
+branchN_last_cmp_lengths:
+    CMPQ    R9, R11
+    JL      branchN_last_less
+    // searchKey >= last: return n-1 (rightmost child)
+    MOVQ    R10, ret+56(FP)
+    RET
+
+branchN_last_found_diff:
+    XORQ    $0xFFFF, R15
+    BSFQ    R15, R15
+    MOVBLZX 0(R13)(R15*1), AX
+    MOVBLZX 0(DI)(R15*1), BX
+    CMPB    AL, BL
+    JB      branchN_last_less
+    // searchKey > last: return n-1
+    MOVQ    R10, ret+56(FP)
+    RET
+
+branchN_last_diff_byte:
+    JB      branchN_last_less
+    MOVQ    R10, ret+56(FP)
+    RET
+
+branchN_last_less:
+    // searchKey < last: binary search from 1 to n-2
+    MOVQ    $1, AX                       // low = 1
+    MOVQ    R10, BX
+    DECQ    BX                           // high = n-2
+
+branchN_loop:
+    CMPQ    AX, BX
+    JG      branchN_done
+
+    // mid = (low + high) / 2
+    MOVQ    AX, R10
+    ADDQ    BX, R10
+    SHRQ    $1, R10                      // R10 = mid
+
+    // Get entry offset for mid
+    LEAQ    20(SI)(R10*2), DI
+    MOVWLZX 0(DI), R11
+    ADDQ    $20, R11
+
+    // Get key info
+    LEAQ    (SI)(R11*1), DI
+    MOVWLZX 6(DI), R11                   // R11 = nodeKeyLen
+    ADDQ    $8, DI                       // DI = nodeKey pointer
+
+    // Compare
+    MOVQ    R9, R12
+    CMPQ    R11, R12
+    CMOVQLT R11, R12
+
+    MOVQ    R8, R13
+    MOVQ    R12, R14
+
+branchN_mid_cmp_loop:
+    CMPQ    R14, $16
+    JL      branchN_mid_cmp_small
+
+    MOVOU   0(R13), X0
+    MOVOU   0(DI), X1
+    PCMPEQB X1, X0
+    PMOVMSKB X0, R15
+
+    CMPQ    R15, $0xFFFF
+    JNE     branchN_mid_found_diff
+
+    ADDQ    $16, R13
+    ADDQ    $16, DI
+    SUBQ    $16, R14
+    JMP     branchN_mid_cmp_loop
+
+branchN_mid_cmp_small:
+    TESTQ   R14, R14
+    JZ      branchN_mid_cmp_lengths
+
+branchN_mid_cmp_byte:
+    MOVBLZX 0(R13), R15
+    MOVBLZX 0(DI), R12
+    CMPB    R15B, R12B
+    JNE     branchN_mid_diff_byte
+    INCQ    R13
+    INCQ    DI
+    DECQ    R14
+    JNZ     branchN_mid_cmp_byte
+
+branchN_mid_cmp_lengths:
+    CMPQ    R9, R11
+    JL      branchN_go_left
+    JG      branchN_go_right
+    // Equal: return mid
+    MOVQ    R10, ret+56(FP)
+    RET
+
+branchN_mid_found_diff:
+    XORQ    $0xFFFF, R15
+    BSFQ    R15, R15
+    MOVBLZX 0(R13)(R15*1), R12
+    MOVBLZX 0(DI)(R15*1), R14
+    CMPB    R12B, R14B
+    JB      branchN_go_left
+    JMP     branchN_go_right
+
+branchN_mid_diff_byte:
+    JB      branchN_go_left
+    JMP     branchN_go_right
+
+branchN_go_left:
+    MOVQ    R10, BX
+    DECQ    BX
+    JMP     branchN_loop
+
+branchN_go_right:
+    MOVQ    R10, AX
+    INCQ    AX
+    JMP     branchN_loop
+
+branchN_done:
+    // Return low - 1 (for branch pages)
+    MOVQ    AX, R10
+    DECQ    R10
+    MOVQ    R10, ret+56(FP)
+    RET
+
+branchN_return_zero:
+    MOVQ    $0, ret+56(FP)
+    RET

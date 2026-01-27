@@ -43,3 +43,19 @@ func binarySearchLeaf8(pageData []byte, key uint64, n int) int
 //
 //go:noescape
 func binarySearchBranch8(pageData []byte, key uint64, n int) int
+
+// binarySearchLeafN performs binary search on a leaf page for N-byte keys.
+// Does the entire binary search in assembly with SSE2 comparison.
+// Returns the index where key should be inserted or found.
+// keyLen must be > 0. Optimized for keys >= 16 bytes.
+//
+//go:noescape
+func binarySearchLeafN(pageData []byte, key []byte, n int) int
+
+// binarySearchBranchN performs binary search on a branch page for N-byte keys.
+// Does the entire binary search in assembly with SSE2 comparison.
+// Returns the index of the child to follow.
+// keyLen must be > 0. Optimized for keys >= 16 bytes.
+//
+//go:noescape
+func binarySearchBranchN(pageData []byte, key []byte, n int) int

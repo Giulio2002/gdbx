@@ -104,6 +104,14 @@ func getCachedLongKeyDB(b *testing.B, size int) (*gdbx.Env, *mdbxgo.Env, *bolt.D
 	boltExists := fileExists(boltPath)
 	rocksExists := fileExists(rocksPath)
 
+	// Calculate mmap size based on number of keys
+	// Each key is 64 bytes + 32 byte value + node overhead = ~120 bytes
+	// With page overhead and COW, allocate 3x the data size
+	mmapSize := int64(size) * 120 * 3
+	if mmapSize < 256*1024*1024 {
+		mmapSize = 256 * 1024 * 1024 // Minimum 256MB
+	}
+
 	// Setup gdbx
 	genv, err := gdbx.NewEnv(gdbx.Default)
 	if err != nil {
@@ -114,7 +122,7 @@ func getCachedLongKeyDB(b *testing.B, size int) (*gdbx.Env, *mdbxgo.Env, *bolt.D
 	if err := genv.Open(gdbxPath, gdbx.NoSubdir|gdbx.NoMetaSync|gdbx.WriteMap, 0644); err != nil {
 		b.Fatal(err)
 	}
-	if err := genv.PreExtendMmap(256 * 1024 * 1024); err != nil {
+	if err := genv.PreExtendMmap(mmapSize); err != nil {
 		genv.Close()
 		b.Fatal(err)
 	}

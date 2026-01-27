@@ -45,3 +45,64 @@ func binarySearchLeaf8(pageData []byte, key uint64, n int) int {
 func binarySearchBranch8(pageData []byte, key uint64, n int) int {
 	return -1 // Signal to use Go implementation
 }
+
+// binarySearchLeafN performs binary search on leaf page for N-byte keys.
+// This is the Go fallback implementation for non-AMD64 architectures.
+func binarySearchLeafN(pageData []byte, key []byte, n int) int {
+	if n <= 0 {
+		return 0
+	}
+
+	// Fast path: check last entry first (append optimization)
+	cmp := getKeyAndCompareAsm(pageData, n-1, key)
+	if cmp > 0 {
+		return n // Insert after last
+	}
+	if cmp == 0 {
+		return n - 1 // Found at last position
+	}
+
+	// Binary search from 0 to n-2
+	low, high := 0, n-2
+	for low <= high {
+		mid := (low + high) / 2
+		cmp = getKeyAndCompareAsm(pageData, mid, key)
+		if cmp < 0 {
+			high = mid - 1
+		} else if cmp > 0 {
+			low = mid + 1
+		} else {
+			return mid
+		}
+	}
+	return low
+}
+
+// binarySearchBranchN performs binary search on branch page for N-byte keys.
+// This is the Go fallback implementation for non-AMD64 architectures.
+func binarySearchBranchN(pageData []byte, key []byte, n int) int {
+	if n <= 1 {
+		return 0
+	}
+
+	// Fast path: check last entry first
+	cmp := getKeyAndCompareAsm(pageData, n-1, key)
+	if cmp >= 0 {
+		return n - 1 // Use rightmost child
+	}
+
+	// Binary search from 1 to n-2
+	low, high := 1, n-2
+	for low <= high {
+		mid := (low + high) / 2
+		cmp = getKeyAndCompareAsm(pageData, mid, key)
+		if cmp < 0 {
+			high = mid - 1
+		} else if cmp > 0 {
+			low = mid + 1
+		} else {
+			return mid
+		}
+	}
+	return low - 1
+}

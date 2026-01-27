@@ -68,7 +68,29 @@ func (c *Cursor) put(key, value []byte, flags uint) error {
 	maxVal := c.txn.env.MaxValSize()
 	isBig := len(value) > maxVal
 
-	// Build the node
+	// Fast path: if updating a big value with another big value, try in-place update
+	if exact && isBig {
+		p := c.pages[c.top]
+		idx := int(c.indices[c.top])
+		oldFlags := nodeGetFlagsDirect(p, idx)
+		if oldFlags&nodeBig != 0 {
+			// Both old and new are big - try in-place overflow update
+			oldPgno := nodeGetOverflowPgnoDirect(p, idx)
+			oldSize := nodeGetDataSizeDirect(p, idx)
+			if c.updateOverflowInPlace(oldPgno, oldSize, value) {
+				// Update succeeded in place
+				// Only update node header if size changed
+				if uint32(len(value)) != oldSize {
+					return c.updateBigNodeSize(uint32(len(value)))
+				}
+				// Same size - just mark tree dirty and we're done
+				c.markTreeDirty()
+				return nil
+			}
+		}
+	}
+
+	// Build the node (allocates new overflow pages if big)
 	nodeData, overflowPgno, err := c.buildNode(key, value, isBig)
 	if err != nil {
 		return err
@@ -407,7 +429,29 @@ func (c *Cursor) putAfterPosition(key, value []byte, flags uint, exact, isDupSor
 	maxVal := c.txn.env.MaxValSize()
 	isBig := len(value) > maxVal
 
-	// Build the node
+	// Fast path: if updating a big value with another big value, try in-place update
+	if exact && isBig {
+		p := c.pages[c.top]
+		idx := int(c.indices[c.top])
+		oldFlags := nodeGetFlagsDirect(p, idx)
+		if oldFlags&nodeBig != 0 {
+			// Both old and new are big - try in-place overflow update
+			oldPgno := nodeGetOverflowPgnoDirect(p, idx)
+			oldSize := nodeGetDataSizeDirect(p, idx)
+			if c.updateOverflowInPlace(oldPgno, oldSize, value) {
+				// Update succeeded in place
+				// Only update node header if size changed
+				if uint32(len(value)) != oldSize {
+					return c.updateBigNodeSize(uint32(len(value)))
+				}
+				// Same size - just mark tree dirty and we're done
+				c.markTreeDirty()
+				return nil
+			}
+		}
+	}
+
+	// Build the node (allocates new overflow pages if big)
 	nodeData, overflowPgno, err := c.buildNode(key, value, isBig)
 	if err != nil {
 		return err
@@ -2443,4 +2487,153 @@ func (c *Cursor) markTreeDirty() {
 	if int(c.dbi) < len(c.txn.dbiDirty) {
 		c.txn.dbiDirty[c.dbi] = true
 	}
+}
+
+// updateOverflowInPlace attempts to update overflow data in place when the new value
+// fits within the same number of pages as the old value. Returns true on success.
+func (c *Cursor) updateOverflowInPlace(oldPgno pgno, oldSize uint32, newData []byte) bool {
+	pageSize := int(c.txn.env.pageSize)
+	firstPageData := pageSize - pageHeaderSize
+	newSize := len(newData)
+
+	// Calculate number of pages for old and new data
+	oldRemaining := int(oldSize) - firstPageData
+	oldNumPages := 1
+	if oldRemaining > 0 {
+		oldNumPages += (oldRemaining + pageSize - 1) / pageSize
+	}
+
+	newRemaining := newSize - firstPageData
+	newNumPages := 1
+	if newRemaining > 0 {
+		newNumPages += (newRemaining + pageSize - 1) / pageSize
+	}
+
+	// Can only update in place if new data fits in same or fewer pages
+	if newNumPages > oldNumPages {
+		return false
+	}
+
+	// Fast path for WriteMap mode - write directly to mmap
+	if c.txn.env.isWriteMap() {
+		// Get direct pointer to overflow data in mmap
+		mmapData := c.txn.env.getMmapPageData(oldPgno)
+		if mmapData == nil {
+			return false // Page not in mmap bounds
+		}
+
+		// For multi-page overflow, all pages are contiguous in mmap
+		// First page: [header 20 bytes][data]
+		// Subsequent pages: [data only]
+		// Since pages are contiguous, we can write in one copy for same-size updates
+		if newNumPages == oldNumPages && newSize == int(oldSize) {
+			// Same size - just copy the data directly (no header update needed)
+			copy(mmapData[pageHeaderSize:pageHeaderSize+newSize], newData)
+			return true
+		}
+
+		// Different size or page count - need to update header and possibly clear
+		// Update header on first page
+		p := &page{Data: mmapData}
+		p.header().Txnid = txnid(c.txn.txnID)
+		p.setOverflowPages(uint32(newNumPages))
+
+		// Copy new data
+		copy(mmapData[pageHeaderSize:pageHeaderSize+newSize], newData)
+
+		// Clear any remaining space if new data is smaller
+		totalOldData := int(oldSize)
+		if newSize < totalOldData {
+			clear(mmapData[pageHeaderSize+newSize : pageHeaderSize+totalOldData])
+		}
+
+		// If we used fewer pages, free the extra ones
+		for i := newNumPages; i < oldNumPages; i++ {
+			c.txn.freePages = append(c.txn.freePages, oldPgno+pgno(i))
+			if c.tree.LargePages > 0 {
+				c.tree.LargePages--
+			}
+		}
+
+		return true
+	}
+
+	// Non-WriteMap mode: need to track dirty pages
+	offset := 0
+	for i := 0; i < newNumPages; i++ {
+		currentPgno := oldPgno + pgno(i)
+
+		// Get or create dirty page
+		p := c.txn.dirtyTracker.get(currentPgno)
+		var pdata []byte
+		if p != nil {
+			pdata = p.Data
+		} else {
+			// Page not dirty yet - need to make a dirty copy
+			pdata = c.txn.env.getPageDataFromCache()
+			srcData := c.txn.getPageDataFast(currentPgno)
+			copy(pdata, srcData)
+			c.txn.pooledPageData = append(c.txn.pooledPageData, pdata)
+			p = getPooledPageStruct(pdata)
+			c.txn.pooledPageStructs = append(c.txn.pooledPageStructs, p)
+			c.txn.dirtyTracker.set(currentPgno, p)
+		}
+
+		if i == 0 {
+			// First page has header
+			p.header().Txnid = txnid(c.txn.txnID)
+			p.setOverflowPages(uint32(newNumPages))
+			// Copy data after header
+			end := min(offset+firstPageData, newSize)
+			copy(pdata[pageHeaderSize:], newData[offset:end])
+			if end-offset < firstPageData {
+				clear(pdata[pageHeaderSize+end-offset:])
+			}
+			offset = end
+		} else {
+			// Subsequent pages are raw data
+			end := min(offset+pageSize, newSize)
+			copy(pdata, newData[offset:end])
+			if end-offset < pageSize {
+				clear(pdata[end-offset:])
+			}
+			offset = end
+		}
+	}
+
+	// If we used fewer pages, free the extra ones
+	for i := newNumPages; i < oldNumPages; i++ {
+		c.txn.freePages = append(c.txn.freePages, oldPgno+pgno(i))
+		if c.tree.LargePages > 0 {
+			c.tree.LargePages--
+		}
+	}
+
+	return true
+}
+
+// updateBigNodeSize updates the node header for an in-place big value update.
+// This is called after updateOverflowInPlace succeeds when the size changed.
+func (c *Cursor) updateBigNodeSize(newSize uint32) error {
+	// Get dirty copy of the page
+	dirtyPage, err := c.touchPage()
+	if err != nil {
+		return err
+	}
+
+	idx := int(c.indices[c.top])
+
+	// Update the node's data size field directly
+	nodeOffset := int(dirtyPage.entryOffset(idx))
+	if nodeOffset < pageHeaderSize || nodeOffset >= len(dirtyPage.Data)-nodeSize {
+		return ErrCorruptedError
+	}
+
+	// Node header: [dataSize:4][flags:1][extra:1][keySize:2]
+	// Update dataSize (first 4 bytes of node header)
+	putUint32LE(dirtyPage.Data[nodeOffset:], newSize)
+
+	c.pages[c.top] = dirtyPage
+	c.markTreeDirty()
+	return nil
 }

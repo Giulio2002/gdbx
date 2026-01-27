@@ -1514,10 +1514,12 @@ func (c *Cursor) searchPage(p *page, key []byte) int {
 }
 
 // searchPageAsm is the assembly-optimized version of searchPage for default comparator.
-// Uses specialized assembly for 8-byte keys (common case) or per-comparison assembly for others.
+// Uses specialized assembly for 8-byte keys (common case) or generic N-byte assembly for others.
 func (c *Cursor) searchPageAsm(p *page, key []byte, n int) int {
+	keyLen := len(key)
+
 	// Fast path for 8-byte keys: do entire binary search in assembly
-	if len(key) == 8 {
+	if keyLen == 8 {
 		// Convert key to big-endian uint64 for assembly comparison
 		key64 := binary.BigEndian.Uint64(key)
 
@@ -1535,6 +1537,15 @@ func (c *Cursor) searchPageAsm(p *page, key []byte, n int) int {
 		}
 	}
 
+	// For keys > 8 bytes, use generic N-byte assembly with SSE2
+	if keyLen > 8 {
+		if p.isBranchFast() {
+			return binarySearchBranchN(p.Data, key, n)
+		}
+		return binarySearchLeafN(p.Data, key, n)
+	}
+
+	// Fallback for keys <= 8 bytes (when 8-byte fast path failed or key < 8 bytes)
 	// On branch pages, entry 0 has no key (it's the leftmost child pointer).
 	if p.isBranchFast() {
 		if n == 1 {

@@ -1603,7 +1603,20 @@ func (txn *Txn) fillPageHotPath(pgno pgno, buf *page) *page {
 
 // getLargeData retrieves data from overflow pages.
 // MDBX format: first page has header, subsequent pages are raw data with no header.
+// Since overflow pages are contiguous, we can return a direct slice for read-only txns.
 func (txn *Txn) getLargeData(overflowPgno pgno, size uint32) ([]byte, error) {
+	// Fast path for read-only transactions: direct mmap slice (zero-copy)
+	if txn.flags&uint32(TxnReadOnly) != 0 && txn.mmapData != nil {
+		pageSize := uint64(txn.pageSize)
+		// Data starts after header on first overflow page
+		start := uint64(overflowPgno)*pageSize + pageHeaderSize
+		end := start + uint64(size)
+		if end <= uint64(len(txn.mmapData)) {
+			return txn.mmapData[start:end], nil
+		}
+	}
+
+	// Slow path for write transactions: must copy since pages may be in dirty list
 	pageSize := txn.env.pageSize
 	firstPageData := pageSize - pageHeaderSize // First page has header
 
