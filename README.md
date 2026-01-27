@@ -14,29 +14,29 @@ Common case for database IDs. gdbx uses assembly-optimized binary search with BS
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqPut | 10K | **142** | 228 | 870 | 2121 | 1.6x | 6.1x | 14.9x |
-| RandPut | 10K | **130** | 243 | 837 | 1674 | 1.9x | 6.4x | 12.9x |
-| CursorPut | 10K | **129** | 189 | 848 | 2081 | 1.5x | 6.6x | 16.1x |
-| SeqPut | 100K | **156** | 275 | 812 | 2370 | 1.8x | 5.2x | 15.2x |
-| RandPut | 100K | **155** | 267 | 871 | 1895 | 1.7x | 5.6x | 12.2x |
-| CursorPut | 100K | **148** | 186 | 852 | 1747 | 1.3x | 5.8x | 11.8x |
-| SeqPut | 1M | **184** | 295 | 745 | 1089 | 1.6x | 4.0x | 5.9x |
-| RandPut | 1M | **164** | 294 | 770 | 1392 | 1.8x | 4.7x | 8.5x |
-| CursorPut | 1M | **151** | 189 | 822 | 1307 | 1.3x | 5.4x | 8.7x |
+| SeqPut | 10K | **131** | 230 | 859 | 2271 | 1.8x | 6.6x | 17.3x |
+| RandPut | 10K | **130** | 227 | 862 | 2106 | 1.7x | 6.6x | 16.2x |
+| CursorPut | 10K | **117** | 178 | 867 | 2264 | 1.5x | 7.4x | 19.4x |
+| SeqPut | 100K | **156** | 252 | 875 | 1979 | 1.6x | 5.6x | 12.7x |
+| RandPut | 100K | **150** | 263 | 876 | 1810 | 1.8x | 5.8x | 12.1x |
+| CursorPut | 100K | **157** | 175 | 888 | 1832 | 1.1x | 5.7x | 11.7x |
+| SeqPut | 1M | **166** | 284 | 660 | 1136 | 1.7x | 4.0x | 6.8x |
+| RandPut | 1M | **165** | 286 | 717 | 1080 | 1.7x | 4.3x | 6.5x |
+| CursorPut | 1M | **160** | 189 | 698 | 1114 | 1.2x | 4.4x | 7.0x |
 
 #### Read Operations (ns/op, lower is better)
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqRead | 10K | 32 | 124 | **12** | 618 | 3.9x | 0.4x | 19.3x |
-| RandGet | 10K | **95** | 218 | 824 | 2208 | 2.3x | 8.7x | 23.2x |
-| RandSeek | 10K | **109** | 213 | 503 | 2382 | 2.0x | 4.6x | 21.9x |
-| SeqRead | 100K | 32 | 123 | **21** | 1194 | 3.8x | 0.7x | 37.3x |
-| RandGet | 100K | **121** | 261 | 992 | 2337 | 2.2x | 8.2x | 19.3x |
-| RandSeek | 100K | **138** | 214 | 630 | 3653 | 1.6x | 4.6x | 26.5x |
-| SeqRead | 1M | 36 | 130 | **22** | 268 | 3.6x | 0.6x | 7.4x |
-| RandGet | 1M | **148** | 262 | 1103 | 2155 | 1.8x | 7.5x | 14.6x |
-| RandSeek | 1M | **143** | 220 | 670 | 1231 | 1.5x | 4.7x | 8.6x |
+| SeqRead | 10K | 31 | 113 | **12** | 189 | 3.6x | 0.4x | 6.1x |
+| RandGet | 10K | **94** | 212 | 860 | 2155 | 2.3x | 9.1x | 22.9x |
+| RandSeek | 10K | **102** | 196 | 535 | 1214 | 1.9x | 5.2x | 11.9x |
+| SeqRead | 100K | 31 | 114 | **18** | 848 | 3.7x | 0.6x | 27.4x |
+| RandGet | 100K | **118** | 259 | 1000 | 2510 | 2.2x | 8.5x | 21.3x |
+| RandSeek | 100K | **125** | 200 | 670 | 2335 | 1.6x | 5.4x | 18.7x |
+| SeqRead | 1M | 37 | 113 | **22** | 925 | 3.1x | 0.6x | 25.0x |
+| RandGet | 1M | **155** | 259 | 1121 | 2258 | 1.7x | 7.2x | 14.6x |
+| RandSeek | 1M | **134** | 200 | 744 | 2718 | 1.5x | 5.6x | 20.3x |
 
 *Note: BoltDB wins sequential reads due to simpler cursor iteration, but gdbx dominates random access.*
 
@@ -48,26 +48,26 @@ Longer keys use SSE2-optimized binary search comparing 16 bytes at a time.
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqPut | 10K | **215** | 265 | 623 | 2074 | 1.2x | 2.9x | 9.6x |
-| RandPut | 10K | **198** | 262 | 577 | 2067 | 1.3x | 2.9x | 10.4x |
-| SeqPut | 100K | **275** | 322 | 706 | 1516 | 1.2x | 2.6x | 5.5x |
-| RandPut | 100K | **315** | 333 | 685 | 1410 | 1.1x | 2.2x | 4.5x |
-| SeqPut | 1M | **350** | 360 | 905 | 1071 | 1.0x | 2.6x | 3.1x |
-| RandPut | 1M | **315** | 364 | 923 | 1011 | 1.2x | 2.9x | 3.2x |
+| SeqPut | 10K | **202** | 238 | 565 | 2316 | 1.2x | 2.8x | 11.5x |
+| RandPut | 10K | **192** | 242 | 568 | 2083 | 1.3x | 3.0x | 10.8x |
+| SeqPut | 100K | **227** | 261 | 610 | 1723 | 1.2x | 2.7x | 7.6x |
+| RandPut | 100K | **231** | 261 | 652 | 1575 | 1.1x | 2.8x | 6.8x |
+| SeqPut | 1M | **268** | 312 | 800 | 1022 | 1.2x | 3.0x | 3.8x |
+| RandPut | 1M | **269** | 284 | 901 | 1032 | 1.1x | 3.3x | 3.8x |
 
 #### Read Operations (ns/op, lower is better)
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqRead | 10K | 32 | 125 | **24** | 174 | 3.9x | 0.8x | 5.4x |
-| RandGet | 10K | **120** | 256 | 925 | 2587 | 2.1x | 7.7x | 21.6x |
-| RandSeek | 10K | **140** | 205 | 549 | 1074 | 1.5x | 3.9x | 7.7x |
-| SeqRead | 100K | 34 | 131 | **19** | 337 | 3.9x | 0.6x | 9.9x |
-| RandGet | 100K | **162** | 258 | 1042 | 3501 | 1.6x | 6.4x | 21.6x |
-| RandSeek | 100K | **174** | 230 | 745 | 2065 | 1.3x | 4.3x | 11.9x |
-| SeqRead | 1M | 41 | 135 | **18** | 478 | 3.3x | 0.4x | 11.7x |
-| RandGet | 1M | **185** | 290 | 940 | 7338 | 1.6x | 5.1x | 39.7x |
-| RandSeek | 1M | **199** | 220 | 623 | 4964 | 1.1x | 3.1x | 24.9x |
+| SeqRead | 10K | 34 | 113 | **23** | 158 | 3.3x | 0.7x | 4.6x |
+| RandGet | 10K | **110** | 221 | 975 | 1481 | 2.0x | 8.9x | 13.5x |
+| RandSeek | 10K | **155** | 210 | 610 | 674 | 1.4x | 3.9x | 4.3x |
+| SeqRead | 100K | 35 | 116 | **20** | 158 | 3.3x | 0.6x | 4.5x |
+| RandGet | 100K | **145** | 244 | 1074 | 1265 | 1.7x | 7.4x | 8.7x |
+| RandSeek | 100K | **199** | 216 | 651 | 803 | 1.1x | 3.3x | 4.0x |
+| SeqRead | 1M | 42 | 121 | **19** | 283 | 2.9x | 0.5x | 6.7x |
+| RandGet | 1M | **182** | 274 | 1082 | 2311 | 1.5x | 5.9x | 12.7x |
+| RandSeek | 1M | 225 | **215** | 665 | 1588 | 1.0x | 3.0x | 7.1x |
 
 ### Big Values (8KB)
 
@@ -77,33 +77,33 @@ Large values use zero-copy reads (direct mmap slice) and in-place overflow page 
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqPut | 100 | **295** | 329 | 552 | 3491 | 1.1x | 1.9x | 11.8x |
-| RandPut | 100 | **267** | 327 | 536 | 2433 | 1.2x | 2.0x | 9.1x |
-| SeqPut | 1K | **357** | 419 | 809 | 5098 | 1.2x | 2.3x | 14.3x |
-| RandPut | 1K | **324** | 456 | 713 | 4770 | 1.4x | 2.2x | 14.7x |
-| SeqPut | 10K | 907 | **759** | 799 | 27697 | 0.8x | 0.9x | 30.5x |
-| RandPut | 10K | 828 | **715** | 824 | 26402 | 0.9x | 1.0x | 31.9x |
+| SeqPut | 100 | **268** | 315 | 525 | 2810 | 1.2x | 2.0x | 10.5x |
+| RandPut | 100 | **290** | 308 | 535 | 3378 | 1.1x | 1.8x | 11.6x |
+| SeqPut | 1K | **340** | 420 | 768 | 4274 | 1.2x | 2.3x | 12.6x |
+| RandPut | 1K | **346** | 438 | 776 | 4061 | 1.3x | 2.2x | 11.7x |
+| SeqPut | 10K | 793 | **688** | 832 | 27834 | 0.9x | 1.0x | 35.1x |
+| RandPut | 10K | 896 | **690** | 843 | 28356 | 0.8x | 0.9x | 31.6x |
 
 #### Read Operations (ns/op)
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqRead | 100 | 44 | 139 | **22** | 1511 | 3.2x | 0.5x | 34.3x |
-| RandGet | 100 | **51** | 194 | 424 | 1733 | 3.8x | 8.3x | 34.0x |
-| SeqRead | 1K | **43** | 144 | 74 | 40450 | 3.3x | 1.7x | 941x |
-| RandGet | 1K | **98** | 221 | 921 | 2066 | 2.3x | 9.4x | 21.1x |
-| SeqRead | 10K | **42** | 234 | 122 | 8983 | 5.6x | 2.9x | 214x |
-| RandGet | 10K | **102** | 331 | 1077 | 5440 | 3.2x | 10.6x | 53.3x |
+| SeqRead | 100 | 41 | 126 | **21** | 2682 | 3.1x | 0.5x | 65.4x |
+| RandGet | 100 | **44** | 185 | 473 | 1533 | 4.2x | 10.7x | 34.8x |
+| SeqRead | 1K | **42** | 129 | 77 | 28679 | 3.1x | 1.8x | 683x |
+| RandGet | 1K | **97** | 209 | 921 | 2310 | 2.2x | 9.5x | 23.8x |
+| SeqRead | 10K | **43** | 221 | 112 | 8605 | 5.1x | 2.6x | 200x |
+| RandGet | 10K | **104** | 323 | 1067 | 10713 | 3.1x | 10.3x | 103x |
 
-*Big value reads use zero-copy (direct mmap slice), achieving 80-196 GB/s throughput.*
+*Big value reads use zero-copy (direct mmap slice), achieving 78-200 GB/s throughput.*
 
 ### DBI/Transaction Operations
 
 | Operation | gdbx | mdbx | vs mdbx |
 |-----------|------|------|---------|
-| OpenDBI | 28ns | 264ns | 9.4x faster |
-| BeginTxn (read-only) | 136ns | 301ns | 2.2x faster |
-| BeginTxn (read-write) | 2281ns | 275ns | mdbx faster* |
+| OpenDBI | 27ns | 244ns | 9.0x faster |
+| BeginTxn (read-only) | 139ns | 303ns | 2.2x faster |
+| BeginTxn (read-write) | 2108ns | 281ns | mdbx faster* |
 
 *gdbx uses file-based flock() which has syscall overhead; mdbx uses shared memory locks.
 
@@ -167,7 +167,7 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 ### Search Optimization
 
 - **libmdbx**: Binary search with various optimizations in C.
-- **gdbx**: Assembly-optimized binary search (amd64). 8-byte keys use BSWAP+CMP for single-instruction comparison. Longer keys use SSE2 SIMD comparing 16 bytes at a time with PCMPEQB+PMOVMSKB. Full search loop in assembly avoids Go/asm boundary overhead.
+- **gdbx**: Assembly-optimized binary search (amd64/arm64). 8-byte keys use BSWAP+CMP for single-instruction comparison. Longer keys use SSE2 SIMD comparing 16 bytes at a time with PCMPEQB+PMOVMSKB. Full search loop in assembly avoids Go/asm boundary overhead.
 - **Rationale**: Go function calls have overhead that C doesn't. For the hot path (key comparison during search), keeping the entire binary search loop in assembly eliminates repeated Go/asm transitions. 8-byte keys are common (uint64 IDs) and can be compared in a single operation. SSE2 makes longer keys (64+ bytes) competitive with mdbx.
 
 ### Nested Transactions
@@ -189,19 +189,19 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 
 ```bash
 # Write operations (8-byte keys)
-go test -bench="BenchmarkWriteOps" -benchtime=2s -run=^$ ./tests/
+go test -bench="BenchmarkWriteOps" -benchtime=2s -run=^$ ./benchmarks/
 
 # Read operations (8-byte keys)
-go test -bench="BenchmarkReadOps" -benchtime=2s -run=^$ ./tests/
+go test -bench="BenchmarkReadOps" -benchtime=2s -run=^$ ./benchmarks/
 
 # DBI/Transaction operations
-go test -bench="BenchmarkDBI" -benchtime=2s -run=^$ ./tests/
+go test -bench="BenchmarkDBI" -benchtime=2s -run=^$ ./benchmarks/
 
 # Big values (8KB)
-go test -bench="BenchmarkBigVal" -benchtime=2s -run=^$ ./tests/
+go test -bench="BenchmarkBigVal" -benchtime=2s -run=^$ ./benchmarks/
 
 # 64-byte keys
-go test -bench="BenchmarkReadLong|BenchmarkWriteLong" -benchtime=2s -run=^$ ./tests/
+go test -bench="BenchmarkReadLong|BenchmarkWriteLong" -benchtime=2s -run=^$ ./benchmarks/
 ```
 
 ## License
