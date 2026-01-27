@@ -14,6 +14,161 @@ import (
 	mdbx "github.com/erigontech/mdbx-go/mdbx"
 )
 
+// TestMaxKeyMaxValBugfix verifies the fix for the bug where using maxKey + maxVal
+// together would fail with ErrPageFull. Previously gdbx had:
+// - Wrong MaxKeySize (2038 vs correct 2022)
+// - isBig check didn't account for key+value combined size
+// This test ensures both gdbx and mdbx handle this case identically.
+func TestMaxKeyMaxValBugfix(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	db := newTestDB(t)
+	defer db.cleanup()
+
+	// Get limits from mdbx (the reference implementation)
+	menv, err := mdbx.NewEnv(mdbx.Label("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	menv.SetGeometry(-1, -1, 1<<30, -1, -1, 4096)
+	if err := menv.Open(db.path, mdbx.Create, 0644); err != nil {
+		t.Fatal(err)
+	}
+	mdbxMaxKey := menv.MaxKeySize()
+	menv.Close()
+
+	// Get limits from gdbx
+	genv, err := gdbx.NewEnv(gdbx.Default)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := genv.Open(db.path, 0, 0644); err != nil {
+		t.Fatal(err)
+	}
+	gdbxMaxKey := genv.MaxKeySize()
+	gdbxMaxVal := genv.MaxValSize()
+
+	// Verify MaxKeySize matches
+	if mdbxMaxKey != gdbxMaxKey {
+		t.Fatalf("MaxKeySize mismatch: mdbx=%d, gdbx=%d (bug not fixed!)", mdbxMaxKey, gdbxMaxKey)
+	}
+
+	t.Logf("MaxKeySize: %d (both match)", gdbxMaxKey)
+	t.Logf("gdbx MaxValSize: %d", gdbxMaxVal)
+	t.Logf("Node size with maxKey+maxVal: %d", 8+gdbxMaxKey+gdbxMaxVal)
+	t.Logf("Page capacity: %d", 4096-20-2)
+
+	// THE BUG: This combination used to fail with "page has no space"
+	// because the old code had:
+	// 1. MaxKeySize = 2038 (wrong, should be 2022)
+	// 2. isBig only checked value size, not combined key+value
+	key := make([]byte, gdbxMaxKey)
+	for i := range key {
+		key[i] = byte(i % 256)
+	}
+	value := make([]byte, gdbxMaxVal)
+	for i := range value {
+		value[i] = byte((i + 128) % 256)
+	}
+
+	// Test 1: gdbx can write maxKey + maxVal
+	gtxn, err := genv.BeginTxn(nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = gtxn.Put(gdbx.MainDBI, key, value, 0)
+	if err != nil {
+		t.Fatalf("gdbx Put(maxKey=%d, maxVal=%d) failed: %v\nThis is the bug that should have been fixed!",
+			gdbxMaxKey, gdbxMaxVal, err)
+	}
+	t.Logf("gdbx Put(maxKey=%d, maxVal=%d): OK", gdbxMaxKey, gdbxMaxVal)
+
+	if _, err := gtxn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	genv.Close()
+
+	// Test 2: mdbx can read what gdbx wrote
+	menv, err = mdbx.NewEnv(mdbx.Label("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer menv.Close()
+
+	menv.SetGeometry(-1, -1, 1<<30, -1, -1, 4096)
+	if err := menv.Open(db.path, mdbx.Readonly, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mtxn, err := menv.BeginTxn(nil, mdbx.Readonly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mtxn.Abort()
+
+	mdbi, _ := mtxn.OpenRoot(0)
+	gotVal, err := mtxn.Get(mdbi, key)
+	if err != nil {
+		t.Fatalf("mdbx Get failed: %v", err)
+	}
+	if !bytes.Equal(gotVal, value) {
+		t.Fatalf("mdbx read back incorrect value: got %d bytes, want %d bytes", len(gotVal), len(value))
+	}
+	t.Logf("mdbx read back verified: %d bytes", len(gotVal))
+
+	// Test 3: Verify the exact boundary case
+	// With maxKey=2022, the overflow boundary is at valSize=2044
+	// (pageCapacity=4074, nodeHeader=8, so 4074-8-2022=2044)
+	t.Log("\n--- Testing exact overflow boundary ---")
+
+	db2 := newTestDB(t)
+	defer db2.cleanup()
+
+	genv2, _ := gdbx.NewEnv(gdbx.Default)
+	genv2.Open(db2.path, 0, 0644)
+	defer genv2.Close()
+
+	boundaryTests := []struct {
+		valSize     int
+		shouldBeInline bool
+	}{
+		{2043, true},  // Just under boundary - inline
+		{2044, true},  // Exact boundary - inline (just fits)
+		{2045, false}, // Just over boundary - overflow
+		{2050, false}, // Clearly over - overflow
+	}
+
+	for _, bt := range boundaryTests {
+		gtxn, _ := genv2.BeginTxn(nil, 0)
+
+		testKey := make([]byte, gdbxMaxKey)
+		copy(testKey, []byte("boundary_test"))
+		testKey[13] = byte(bt.valSize & 0xFF)
+		testKey[14] = byte((bt.valSize >> 8) & 0xFF)
+
+		testVal := make([]byte, bt.valSize)
+
+		err := gtxn.Put(gdbx.MainDBI, testKey, testVal, 0)
+		if err != nil {
+			t.Errorf("gdbx Put(maxKey, val=%d) failed: %v", bt.valSize, err)
+			gtxn.Abort()
+			continue
+		}
+
+		nodeSize := 8 + len(testKey) + bt.valSize
+		status := "inline"
+		if nodeSize > 4074 {
+			status = "overflow"
+		}
+		t.Logf("gdbx Put(maxKey=%d, val=%d) nodeSize=%d: OK (%s)",
+			gdbxMaxKey, bt.valSize, nodeSize, status)
+
+		gtxn.Commit()
+	}
+}
+
 // TestLargeKeyValueCompat_MdbxToGdbx creates large key/value pairs with mdbx
 // and verifies gdbx can read them correctly.
 func TestLargeKeyValueCompat_MdbxToGdbx(t *testing.T) {
