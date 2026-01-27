@@ -10,7 +10,7 @@
 //   - Single writer, multiple readers concurrency model
 //   - Memory-mapped I/O for high performance
 //   - ACID transactions with crash recovery
-//   - Nested transactions support
+//   - Nested transaction infrastructure (parent page delegation)
 //
 // Basic usage:
 //

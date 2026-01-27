@@ -14,7 +14,7 @@ Common case for database IDs. gdbx uses assembly-optimized binary search with BS
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqPut | 10K | **134** | 242 | 837 | 2121 | 1.8x | 6.2x | 15.8x |
+| SeqPut | 10K | **142** | 228 | 870 | 2121 | 1.6x | 6.1x | 14.9x |
 | RandPut | 10K | **130** | 243 | 837 | 1674 | 1.9x | 6.4x | 12.9x |
 | CursorPut | 10K | **129** | 189 | 848 | 2081 | 1.5x | 6.6x | 16.1x |
 | SeqPut | 100K | **156** | 275 | 812 | 2370 | 1.8x | 5.2x | 15.2x |
@@ -28,8 +28,8 @@ Common case for database IDs. gdbx uses assembly-optimized binary search with BS
 
 | Operation | Entries | gdbx | mdbx | BoltDB | RocksDB | vs mdbx | vs Bolt | vs Rocks |
 |-----------|---------|------|------|--------|---------|---------|---------|----------|
-| SeqRead | 10K | 32 | 127 | **13** | 697 | 4.0x | 0.4x | 21.8x |
-| RandGet | 10K | **96** | 219 | 822 | 2343 | 2.3x | 8.6x | 24.4x |
+| SeqRead | 10K | 32 | 124 | **12** | 618 | 3.9x | 0.4x | 19.3x |
+| RandGet | 10K | **95** | 218 | 824 | 2208 | 2.3x | 8.7x | 23.2x |
 | RandSeek | 10K | **109** | 213 | 503 | 2382 | 2.0x | 4.6x | 21.9x |
 | SeqRead | 100K | 32 | 123 | **21** | 1194 | 3.8x | 0.7x | 37.3x |
 | RandGet | 100K | **121** | 261 | 992 | 2337 | 2.2x | 8.2x | 19.3x |
@@ -101,9 +101,9 @@ Large values use zero-copy reads (direct mmap slice) and in-place overflow page 
 
 | Operation | gdbx | mdbx | vs mdbx |
 |-----------|------|------|---------|
-| OpenDBI | 30ns | 250ns | 8.3x faster |
-| BeginTxn (read-only) | 135ns | 321ns | 2.4x faster |
-| BeginTxn (read-write) | 2494ns | 297ns | mdbx faster* |
+| OpenDBI | 28ns | 264ns | 9.4x faster |
+| BeginTxn (read-only) | 136ns | 301ns | 2.2x faster |
+| BeginTxn (read-write) | 2281ns | 275ns | mdbx faster* |
 
 *gdbx uses file-based flock() which has syscall overhead; mdbx uses shared memory locks.
 
@@ -122,7 +122,7 @@ Large values use zero-copy reads (direct mmap slice) and in-place overflow page 
 - Memory-mapped I/O
 - B+ tree storage
 - DupSort tables
-- Nested transactions
+- Nested transaction infrastructure (parent page delegation)
 
 ## Implementation Differences vs libmdbx
 
@@ -132,7 +132,7 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 
 - **libmdbx**: Configurable via `MDBX_LOCKING` build option. Supports SystemV IPC semaphores (default), POSIX shared mutexes, POSIX-2008 robust mutexes, or Win32 file locking. Lock state stored in shared memory (lock file) with complex handoff protocols.
 - **gdbx**: Uses file-based flock() for writer lock. Simpler but higher syscall overhead per write transaction.
-- **Rationale**: flock() is available on all Unix systems and Windows (via syscall), requires no platform-specific code paths, and is simple to reason about. The ~2μs overhead per write transaction is acceptable since actual write work dominates. Avoiding IPC semaphores eliminates cleanup issues on process crash.
+- **Rationale**: flock() is available on all Unix systems and Windows (via syscall), requires no platform-specific code paths, and is simple to reason about. The ~2us overhead per write transaction is acceptable since actual write work dominates. Avoiding IPC semaphores eliminates cleanup issues on process crash.
 
 ### Reader Registration
 
@@ -143,8 +143,8 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 ### Page Management
 
 - **libmdbx**: Complex spill/unspill mechanism to handle dirty pages exceeding RAM. Pages can be temporarily written to disk and reloaded.
-- **gdbx**: Simpler dirty page tracking with flat array (65K pages) + overflow map. No spilling - all dirty pages kept in memory until commit.
-- **Rationale**: Spilling adds significant complexity for edge cases. Most write transactions modify far fewer than 65K pages (256MB at 4KB page size). The flat array gives O(1) lookup with no allocations. Applications needing huge transactions can increase RAM or batch writes.
+- **gdbx**: Dirty pages tracked via fibonacci hash map (open addressing with linear probing). No spilling - all dirty pages kept in memory until commit.
+- **Rationale**: Spilling adds significant complexity for edge cases. The fibonacci hash map gives O(1) average lookup with good cache locality for sequential page numbers (common in B+tree operations). Applications needing huge transactions can increase RAM or batch writes.
 
 ### Garbage Collection
 
@@ -173,8 +173,8 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 ### Nested Transactions
 
 - **libmdbx**: Full nested transaction support with parent page shadowing and complex abort handling.
-- **gdbx**: Nested transaction support with page COW from parent. Simpler implementation.
-- **Rationale**: Both support nested transactions for the same use cases (partial rollback). gdbx uses straightforward COW from parent pages rather than shadow tracking - easier to verify correctness.
+- **gdbx**: Infrastructure for nested transactions exists (BeginTxn accepts parent, dirty page reads delegate to parent). The `Sub()` method currently runs inline without true nesting.
+- **Rationale**: The parent delegation mechanism provides the foundation for nested transaction support. Full implementation would add commit/abort propagation logic.
 
 ### What's Identical
 
@@ -184,6 +184,25 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 - DupSort sub-page/sub-tree handling
 - Overflow page format for large values
 - Lock file format and reader slot layout
+
+## Running Benchmarks
+
+```bash
+# Write operations (8-byte keys)
+go test -bench="BenchmarkWriteOps" -benchtime=2s -run=^$ ./tests/
+
+# Read operations (8-byte keys)
+go test -bench="BenchmarkReadOps" -benchtime=2s -run=^$ ./tests/
+
+# DBI/Transaction operations
+go test -bench="BenchmarkDBI" -benchtime=2s -run=^$ ./tests/
+
+# Big values (8KB)
+go test -bench="BenchmarkBigVal" -benchtime=2s -run=^$ ./tests/
+
+# 64-byte keys
+go test -bench="BenchmarkReadLong|BenchmarkWriteLong" -benchtime=2s -run=^$ ./tests/
+```
 
 ## License
 
