@@ -3,10 +3,11 @@ package gdbx
 import (
 	"bytes"
 	"encoding/binary"
-	"math/bits"
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/Giulio2002/gdbx/internal/fastmap"
 )
 
 // Global cursor cache - avoids sync.Pool.Put allocation overhead
@@ -136,99 +137,41 @@ func getPooledPageStruct(data []byte) *page {
 	return getPageStructFromCache(data)
 }
 
-// dirtyPageTracker provides O(1) dirty page lookups using a flat array.
-// This replaces the map[pgno]*page for better performance on write-heavy workloads.
+// dirtyPageTracker tracks dirty pages using a fast open-addressing hash map.
+// Uses fibonacci hashing with random seed - much faster than Go's built-in map.
 type dirtyPageTracker struct {
-	// Flat array for pages 0-65535 (256MB at 4KB page size)
-	// Uses 512KB memory but zero allocations during operation
-	pages [65536]*page
-
-	// Fallback map for page numbers >= 64K (rare but must be supported)
-	overflow map[pgno]*page
-
-	// Bitmap tracking which pages are set (for fast iteration)
-	bitmap [1024]uint64 // 65536 bits
-
-	count int
+	m fastmap.Uint32Map
 }
 
 // get returns the dirty page for the given page number, or nil if not dirty.
 func (d *dirtyPageTracker) get(pn pgno) *page {
-	if pn < 65536 {
-		return d.pages[pn]
-	}
-	// Fallback to overflow map for large page numbers (rare)
-	if d.overflow == nil {
+	ptr := d.m.Get(uint32(pn))
+	if ptr == nil {
 		return nil
 	}
-	return d.overflow[pn]
+	return (*page)(ptr)
 }
 
 // set stores a dirty page.
 func (d *dirtyPageTracker) set(pn pgno, p *page) {
-	if pn < 65536 {
-		if d.pages[pn] == nil {
-			d.count++
-			// Set bitmap for iteration
-			d.bitmap[pn>>6] |= 1 << (pn & 63)
-		}
-		d.pages[pn] = p
-		return
-	}
-	// Fallback to overflow map for large page numbers
-	if d.overflow == nil {
-		d.overflow = make(map[pgno]*page)
-	}
-	if d.overflow[pn] == nil {
-		d.count++
-	}
-	d.overflow[pn] = p
+	d.m.Set(uint32(pn), unsafe.Pointer(p))
 }
 
 // forEach iterates over all dirty pages.
 func (d *dirtyPageTracker) forEach(fn func(pgno, *page)) {
-	// Iterate using bitmap for efficiency
-	for i := 0; i < 1024; i++ {
-		b := d.bitmap[i]
-		if b == 0 {
-			continue
-		}
-		base := pgno(i * 64)
-		for b != 0 {
-			// Find lowest set bit using CPU instruction
-			pos := bits.TrailingZeros64(b)
-			pn := base + pgno(pos)
-			if d.pages[pn] != nil {
-				fn(pn, d.pages[pn])
-			}
-			b &= b - 1 // clear lowest bit
-		}
-	}
-
-	// Iterate overflow map
-	for pn, p := range d.overflow {
-		fn(pn, p)
-	}
+	d.m.ForEach(func(key uint32, ptr unsafe.Pointer) {
+		fn(pgno(key), (*page)(ptr))
+	})
 }
 
 // clear resets the tracker to empty state.
 func (d *dirtyPageTracker) clear() {
-	// Fast path: nothing to clear
-	if d.count == 0 {
-		return
-	}
-
-	// Use Go's built-in clear for the arrays - this is very fast
-	clear(d.pages[:])
-	clear(d.bitmap[:])
-	clear(d.overflow)
-
-	d.count = 0
+	d.m.Clear()
 }
 
 // len returns the number of dirty pages.
 func (d *dirtyPageTracker) len() int {
-	return d.count
+	return d.m.Len()
 }
 
 // txnSignature is the magic number for valid transactions
