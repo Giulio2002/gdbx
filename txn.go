@@ -7,7 +7,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/Giulio2002/gdbx/internal/fastmap"
+	"github.com/Giulio2002/gdbx/fastmap"
 )
 
 // Global cursor cache - avoids sync.Pool.Put allocation overhead
