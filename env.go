@@ -510,13 +510,17 @@ func (e *Env) Label() Label {
 }
 
 // MaxKeySize returns the maximum key size for the environment.
-// This matches libmdbx: pageSize/2 - nodeSize(8) - indxSize(2)
+// This matches libmdbx's branch page constraint:
+// BRANCH_NODE_MAX = EVEN_FLOOR((PAGEROOM - indx - node) / 2 - indx)
+// MaxKeySize = BRANCH_NODE_MAX - NODESIZE
 func (e *Env) MaxKeySize() int {
 	ps := int(e.pageSize)
 	if ps == 0 {
 		ps = DefaultPageSize
 	}
-	return ps/2 - 8 - 2
+	pageRoom := ps - 20                          // pageSize - header
+	branchNodeMax := ((pageRoom-2-8)/2 - 2) &^ 1 // EVEN_FLOOR formula
+	return branchNodeMax - 8
 }
 
 // MaxValSize returns the maximum inline value size.

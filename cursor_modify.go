@@ -65,8 +65,11 @@ func (c *Cursor) put(key, value []byte, flags uint) error {
 	}
 
 	// Determine if value is too large for inline storage
+	// Must check both: value exceeds maxVal OR combined node exceeds page capacity
 	maxVal := c.txn.env.MaxValSize()
-	isBig := len(value) > maxVal
+	pageCapacity := int(c.txn.env.pageSize) - 20 - 2 // pageSize - header - entry pointer
+	nodeSize := 8 + len(key) + len(value)            // header + key + value
+	isBig := len(value) > maxVal || nodeSize > pageCapacity
 
 	// Fast path: if updating a big value with another big value, try in-place update
 	if exact && isBig {
@@ -426,8 +429,11 @@ func (c *Cursor) putAfterPosition(key, value []byte, flags uint, exact, isDupSor
 	}
 
 	// Determine if value is too large for inline storage
+	// Must check both: value exceeds maxVal OR combined node exceeds page capacity
 	maxVal := c.txn.env.MaxValSize()
-	isBig := len(value) > maxVal
+	pageCapacity := int(c.txn.env.pageSize) - 20 - 2 // pageSize - header - entry pointer
+	nodeSize := 8 + len(key) + len(value)            // header + key + value
+	isBig := len(value) > maxVal || nodeSize > pageCapacity
 
 	// Fast path: if updating a big value with another big value, try in-place update
 	if exact && isBig {

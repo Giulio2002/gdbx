@@ -133,8 +133,12 @@ func TestMaxKeySize(t *testing.T) {
 		t.Errorf("MaxKeySize should be > 0, got %d", maxKey)
 	}
 
-	// Default page size is 4096, max key = pageSize/2 - 8 - 2 = 2038
-	expected := DefaultPageSize/2 - 8 - 2
+	// Match libmdbx's branch page constraint:
+	// BRANCH_NODE_MAX = EVEN_FLOOR((PAGEROOM - indx - node) / 2 - indx)
+	// MaxKeySize = BRANCH_NODE_MAX - NODESIZE
+	pageRoom := DefaultPageSize - 20
+	branchNodeMax := ((pageRoom-2-8)/2 - 2) &^ 1
+	expected := branchNodeMax - 8 // = 2022 for 4096 page size
 	if maxKey != expected {
 		t.Errorf("MaxKeySize mismatch: got %d, want %d", maxKey, expected)
 	}
