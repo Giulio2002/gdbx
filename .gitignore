@@ -8,7 +8,7 @@ agenst-log.txt
 ORCHESTRATOR.md
 *.txt
 *.prof
-
+testdata
 # Large benchmark databases
 *.db
 **/bench_*.db
