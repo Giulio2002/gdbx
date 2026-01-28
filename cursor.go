@@ -161,7 +161,7 @@ func (c *Cursor) refreshStalePages() {
 
 	// Update cached mmap data
 	if c.txn.env.dataMap != nil {
-		c.mmapData = c.txn.env.dataMap.data
+		c.mmapData = c.txn.env.dataMap.Data()
 		c.txn.mmapData = c.mmapData // Update transaction's cache too
 	}
 	c.mmapVersion = c.txn.env.mmapVersion

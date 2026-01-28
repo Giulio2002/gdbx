@@ -8,6 +8,8 @@ import (
 	"unsafe"
 
 	"github.com/Giulio2002/gdbx/fastmap"
+	mmappkg "github.com/Giulio2002/gdbx/mmap"
+	"github.com/Giulio2002/gdbx/spill"
 )
 
 // Global cursor cache - avoids sync.Pool.Put allocation overhead
@@ -218,6 +220,9 @@ type Txn struct {
 	pooledPageData    [][]byte
 	pooledPageStructs []*page
 
+	// Spill buffer slots - maps pgno to slot (for returning after commit/abort)
+	spillSlots fastmap.Uint32Map
+
 	// Scratch buffer for page compaction (avoids sync.Pool overhead)
 	compactBuf [4096]byte
 
@@ -408,6 +413,16 @@ func (txn *Txn) Commit() (CommitLatency, error) {
 	returnPageStructsToCache(txn.pooledPageStructs)
 	txn.pooledPageStructs = txn.pooledPageStructs[:0]
 
+	// Release spill buffer slots
+	if txn.spillSlots.Len() > 0 && txn.env.spillBuf != nil {
+		slots := make([]*spill.Slot, 0, txn.spillSlots.Len())
+		txn.spillSlots.ForEach(func(_ uint32, v unsafe.Pointer) {
+			slots = append(slots, (*spill.Slot)(v))
+		})
+		txn.env.spillBuf.ReleaseBulk(slots)
+		txn.spillSlots.Clear()
+	}
+
 	// Clear page cache (may have entries from reading before modification)
 	for k := range txn.pageCache {
 		delete(txn.pageCache, k)
@@ -478,6 +493,16 @@ func (txn *Txn) abortInternal() error {
 		txn.pooledPageData = txn.pooledPageData[:0]
 		returnPageStructsToCache(txn.pooledPageStructs)
 		txn.pooledPageStructs = txn.pooledPageStructs[:0]
+
+		// Release spill buffer slots
+		if txn.spillSlots.Len() > 0 && txn.env.spillBuf != nil {
+			slots := make([]*spill.Slot, 0, txn.spillSlots.Len())
+			txn.spillSlots.ForEach(func(_ uint32, v unsafe.Pointer) {
+				slots = append(slots, (*spill.Slot)(v))
+			})
+			txn.env.spillBuf.ReleaseBulk(slots)
+			txn.spillSlots.Clear()
+		}
 	}
 
 	txn.signature = 0
@@ -547,7 +572,7 @@ func (txn *Txn) Renew() error {
 	txn.env.mu.RLock()
 	meta := txn.env.meta.Load().recentMeta()
 	// Update mmap cache while holding the lock
-	txn.mmapData = txn.env.dataMap.data
+	txn.mmapData = txn.env.dataMap.Data()
 	txn.pageSize = txn.env.pageSize
 	txn.env.mu.RUnlock()
 
@@ -1496,7 +1521,7 @@ func (txn *Txn) getPageData(pg pgno) ([]byte, error) {
 // Called once on first fast access.
 func (txn *Txn) initMmapCache() {
 	if txn.mmapData == nil && txn.env.dataMap != nil {
-		txn.mmapData = txn.env.dataMap.data
+		txn.mmapData = txn.env.dataMap.Data()
 		txn.pageSize = txn.env.pageSize
 	}
 }
@@ -1516,7 +1541,7 @@ func (txn *Txn) getPageDataFast(pgno pgno) []byte {
 	// and we're accessing tree data that references new pages.
 	// Old mmaps are kept alive in env.oldMmaps so this is safe.
 	if end > uint64(len(txn.mmapData)) {
-		txn.mmapData = txn.env.dataMap.data
+		txn.mmapData = txn.env.dataMap.Data()
 		// If still out of bounds after refresh, this is a bug
 		if end > uint64(len(txn.mmapData)) {
 			// Return empty slice to avoid panic - caller will handle error
@@ -1698,7 +1723,7 @@ func (txn *Txn) writeDirtyPages() error {
 	requiredSize = alignToSysPageSize(requiredSize)
 
 	// Get current mmap size (avoids syscall)
-	currentSize := txn.env.dataMap.size
+	currentSize := txn.env.dataMap.Size()
 
 	// Extend file if needed
 	if requiredSize > currentSize {
@@ -1711,7 +1736,7 @@ func (txn *Txn) writeDirtyPages() error {
 		oldMap := txn.env.dataMap
 
 		writable := txn.env.flags&ReadOnly == 0 && txn.env.flags&WriteMap != 0
-		dm, err := mmapMap(int(txn.env.dataFile.Fd()), 0, int(requiredSize), writable)
+		dm, err := mmappkg.New(int(txn.env.dataFile.Fd()), 0, int(requiredSize), writable)
 		if err != nil {
 			return WrapError(ErrProblem, err)
 		}
@@ -1736,9 +1761,9 @@ func (txn *Txn) writeDirtyPages() error {
 	}
 
 	// WriteMap fast path: if all dirty pages are in mmap, nothing to do
-	// Use hasNonMmapPages flag to skip iteration entirely (O(1) instead of O(n))
+	// Skip only if no pages are in spill buffer (spillSlots) or heap (hasNonMmapPages)
 	useWriteMap := txn.env.flags&WriteMap != 0 && txn.env.dataMap != nil
-	if useWriteMap && !txn.hasNonMmapPages {
+	if useWriteMap && !txn.hasNonMmapPages && txn.spillSlots.Len() == 0 {
 		// All pages are in mmap, nothing to write - skip iteration entirely
 		return nil
 	}
@@ -1756,7 +1781,7 @@ func (txn *Txn) writeDirtyPages() error {
 			// WriteMap mode: check if page is in mmap
 			// If p.Data points into mmap, it's already written
 			// If it points to allocated memory, we need to copy to mmap or write to file
-			mmapData := txn.env.dataMap.data
+			mmapData := txn.env.dataMap.Data()
 			end := int(offset) + len(p.Data)
 			if end <= len(mmapData) {
 				// Check if p.Data is already the mmap slice (same backing array)
@@ -1793,7 +1818,7 @@ func (txn *Txn) updateMeta() error {
 	// WriteMap fast path: write directly to mmap (avoids WriteAt syscalls)
 	useWriteMap := txn.env.flags&WriteMap != 0 && txn.env.dataMap != nil
 	if useWriteMap {
-		mmapData := txn.env.dataMap.data
+		mmapData := txn.env.dataMap.Data()
 		offset := int(metaIdx) * int(pageSize)
 		end := offset + int(pageSize)
 

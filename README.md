@@ -123,6 +123,7 @@ Large values use zero-copy reads (direct mmap slice) and in-place overflow page 
 - B+ tree storage
 - DupSort tables
 - Nested transaction infrastructure (parent page delegation)
+- Zero heap allocations on writes (dirty pages in mmap'd spill buffer)
 
 ## Implementation Differences vs libmdbx
 
@@ -143,8 +144,8 @@ gdbx is file-format compatible with libmdbx but the implementation differs:
 ### Page Management
 
 - **libmdbx**: Complex spill/unspill mechanism to handle dirty pages exceeding RAM. Pages can be temporarily written to disk and reloaded.
-- **gdbx**: Dirty pages tracked via fibonacci hash map (open addressing with linear probing). No spilling - all dirty pages kept in memory until commit.
-- **Rationale**: Spilling adds significant complexity for edge cases. The fibonacci hash map gives O(1) average lookup with good cache locality for sequential page numbers (common in B+tree operations). Applications needing huge transactions can increase RAM or batch writes.
+- **gdbx**: Dirty pages stored in a memory-mapped spill buffer (`spill/` package) rather than Go heap. The spill buffer uses a segmented design with multiple mmap regions to allow growth without invalidating existing page slices. Each segment has its own bitmap for O(1) slot allocation. Page lookups use a fibonacci hash map (open addressing with linear probing).
+- **Rationale**: Storing dirty pages in mmap'd memory eliminates GC pressure entirely - the OS manages paging while Go sees only small slot metadata. The segmented design avoids remapping (which would invalidate existing slices) by simply adding new segments when capacity is exhausted. This achieves zero heap allocations on all write operations while supporting large transactions.
 
 ### Garbage Collection
 

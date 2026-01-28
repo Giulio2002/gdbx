@@ -8,6 +8,9 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	mmappkg "github.com/Giulio2002/gdbx/mmap"
+	"github.com/Giulio2002/gdbx/spill"
 )
 
 // sysPageSize is the system's memory page size, cached at init time.
@@ -37,12 +40,12 @@ type Env struct {
 
 	// File handles
 	dataFile *os.File
-	dataMap  *mmap
+	dataMap  *mmappkg.Map
 	lockFile *lockFile
 
 	// Old mmaps waiting to be cleaned up (for COW safety)
 	// These are kept alive until no readers need them
-	oldMmaps   []*mmap
+	oldMmaps   []*mmappkg.Map
 	oldMmapsMu sync.Mutex
 
 	// Transaction tracking for safe Close()
@@ -81,6 +84,9 @@ type Env struct {
 	// mmap version counter - incremented on each remap
 	// Used by cursors to detect stale page references
 	mmapVersion uint64
+
+	// Spill buffer for dirty pages (reduces heap pressure)
+	spillBuf *spill.Buffer
 }
 
 // dbiInfo holds information about an open database.
@@ -191,7 +197,7 @@ func (e *Env) Open(path string, flags uint, mode os.FileMode) error {
 
 	// Memory-map the data file
 	writable := flags&ReadOnly == 0 && flags&WriteMap != 0
-	dm, err := mmapMap(int(dataFile.Fd()), 0, int(fileSize), writable)
+	dm, err := mmappkg.New(int(dataFile.Fd()), 0, int(fileSize), writable)
 	if err != nil {
 		e.closeFiles()
 		return WrapError(ErrInvalid, err)
@@ -222,6 +228,21 @@ func (e *Env) Open(path string, flags uint, mode os.FileMode) error {
 	// Initialize core DBIs
 	e.freeDBI = FreeDBI
 	e.mainDBI = MainDBI
+
+	// Initialize spill buffer for dirty pages (reduces heap pressure)
+	// Only for writable environments
+	if flags&ReadOnly == 0 {
+		spillPath := path + ".spill"
+		if flags&NoSubdir != 0 {
+			spillPath = path + "-spill"
+		}
+		buf, err := spill.New(spillPath, e.pageSize, spill.DefaultInitialCap)
+		if err != nil {
+			e.closeFiles()
+			return WrapError(ErrProblem, err)
+		}
+		e.spillBuf = buf
+	}
 
 	return nil
 }
@@ -272,7 +293,7 @@ func (e *Env) initNewDB() error {
 // Always creates a new metaTriple and atomically swaps to avoid races
 // between concurrent read and write transactions.
 func (e *Env) readMeta() error {
-	data := e.dataMap.data
+	data := e.dataMap.Data()
 	if len(data) < int(e.pageSize)*NumMetas {
 		return NewError(ErrCorrupted)
 	}
@@ -298,15 +319,19 @@ func (e *Env) readMeta() error {
 
 // closeFiles closes all open files.
 func (e *Env) closeFiles() {
+	if e.spillBuf != nil {
+		e.spillBuf.Close(true) // Delete spill file on env close
+		e.spillBuf = nil
+	}
 	if e.dataMap != nil {
-		e.dataMap.unmap()
+		e.dataMap.Close()
 		e.dataMap = nil
 	}
 	// Clean up any old mmaps kept for COW safety
 	e.oldMmapsMu.Lock()
 	for _, m := range e.oldMmaps {
 		if m != nil {
-			m.unmap()
+			m.Close()
 		}
 	}
 	e.oldMmaps = nil
@@ -385,8 +410,8 @@ func (e *Env) Close() {
 
 // CloseEx closes the environment with optional sync control.
 func (e *Env) CloseEx(dontSync bool) {
-	if !dontSync && e.dataMap != nil && e.dataMap.writable {
-		e.dataMap.sync()
+	if !dontSync && e.dataMap != nil && e.dataMap.Writable() {
+		e.dataMap.Sync()
 	}
 	e.Close()
 }
@@ -407,9 +432,9 @@ func (e *Env) Sync(force bool, nonblock bool) error {
 	}
 
 	if force {
-		return e.dataMap.sync()
+		return e.dataMap.Sync()
 	}
-	return e.dataMap.syncAsync()
+	return e.dataMap.SyncAsync()
 }
 
 // SetMaxDBs sets the maximum number of named databases.
@@ -663,7 +688,7 @@ func (e *Env) beginReadTxn() (*Txn, error) {
 	e.lockFile.setReaderTxnid(slot, uint64(meta.txnID()))
 
 	// Initialize mmap cache while holding the lock to avoid race with write txn remap
-	txn.mmapData = e.dataMap.data
+	txn.mmapData = e.dataMap.Data()
 	txn.pageSize = e.pageSize
 
 	// Track reader for safe Close() - Close() will wait for all readers to finish
@@ -770,7 +795,7 @@ func (e *Env) beginWriteTxn(parent *Txn, flags uint) (*Txn, error) {
 	}
 
 	// Initialize mmap cache while holding the lock
-	txn.mmapData = e.dataMap.data
+	txn.mmapData = e.dataMap.Data()
 	txn.pageSize = e.pageSize
 
 	// Track transaction for safe Close() - Close() will wait for all transactions to finish
@@ -803,7 +828,7 @@ func (e *Env) getPageData(pg pgno) ([]byte, error) {
 		return nil, NewError(ErrInvalid)
 	}
 
-	data := e.dataMap.data
+	data := e.dataMap.Data()
 	offset := uint64(pg) * uint64(e.pageSize)
 	end := offset + uint64(e.pageSize)
 
@@ -1343,12 +1368,13 @@ func (e *Env) getMmapPageData(pn pgno) []byte {
 	if e.dataMap == nil {
 		return nil
 	}
+	data := e.dataMap.Data()
 	offset := uint64(pn) * uint64(e.pageSize)
 	end := offset + uint64(e.pageSize)
-	if end > uint64(len(e.dataMap.data)) {
+	if end > uint64(len(data)) {
 		return nil
 	}
-	return e.dataMap.data[offset:end]
+	return data[offset:end]
 }
 
 // isWriteMap returns true if WriteMap mode is enabled.
@@ -1368,7 +1394,7 @@ func (e *Env) extendMmap(needPgno pgno) bool {
 	neededSize := int64(needPgno+1) * int64(e.pageSize)
 
 	// Check if already large enough
-	currentSize := int64(len(e.dataMap.data))
+	currentSize := int64(len(e.dataMap.Data()))
 	if neededSize <= currentSize {
 		return true
 	}
@@ -1397,7 +1423,7 @@ func (e *Env) extendMmap(needPgno pgno) bool {
 	}
 
 	// Remap
-	if err := e.dataMap.remap(newSize); err != nil {
+	if err := e.dataMap.Remap(newSize); err != nil {
 		return false
 	}
 
@@ -1424,7 +1450,7 @@ func (e *Env) PreExtendMmap(size int64) error {
 		return NewError(ErrInvalid)
 	}
 
-	currentSize := int64(len(e.dataMap.data))
+	currentSize := int64(len(e.dataMap.Data()))
 	if size <= currentSize {
 		return nil // Already large enough
 	}
@@ -1447,7 +1473,7 @@ func (e *Env) PreExtendMmap(size int64) error {
 
 	// Create new mmap
 	writable := e.flags&ReadOnly == 0 && e.flags&WriteMap != 0
-	newMap, err := mmapMap(int(e.dataFile.Fd()), 0, int(size), writable)
+	newMap, err := mmappkg.New(int(e.dataFile.Fd()), 0, int(size), writable)
 	if err != nil {
 		return WrapError(ErrProblem, err)
 	}
@@ -1472,6 +1498,44 @@ func (e *Env) PreExtendMmap(size int64) error {
 	}
 
 	return nil
+}
+
+// EnableSpillBuffer creates a spill buffer for dirty pages.
+// This reduces heap pressure by storing dirty pages in a memory-mapped file
+// instead of Go-allocated memory. Call this after Open() but before
+// starting write transactions.
+// The initialCap parameter specifies the initial capacity in pages.
+// If initialCap is 0, a default value is used.
+func (e *Env) EnableSpillBuffer(initialCap uint32) error {
+	if !e.valid() {
+		return NewError(ErrInvalid)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.spillBuf != nil {
+		return nil // Already enabled
+	}
+
+	// Create spill file path
+	spillPath := e.path + ".spill"
+	if e.flags&NoSubdir != 0 {
+		spillPath = e.path + "-spill"
+	}
+
+	buf, err := spill.New(spillPath, e.pageSize, initialCap)
+	if err != nil {
+		return WrapError(ErrProblem, err)
+	}
+
+	e.spillBuf = buf
+	return nil
+}
+
+// SpillBuffer returns the spill buffer, or nil if not enabled.
+func (e *Env) SpillBuffer() *spill.Buffer {
+	return e.spillBuf
 }
 
 var debugEnabled = false

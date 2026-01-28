@@ -1,6 +1,6 @@
 //go:build linux
 
-package gdbx
+package mmap
 
 import (
 	"syscall"
@@ -8,7 +8,7 @@ import (
 )
 
 // tryMremap attempts to use Linux mremap syscall for efficient remapping.
-func (m *mmap) tryMremap(newSize int) ([]byte, error) {
+func (m *Map) tryMremap(newSize int) ([]byte, error) {
 	const MREMAP_MAYMOVE = 1
 
 	newAddr, _, errno := syscall.Syscall6(

@@ -2,6 +2,9 @@ package gdbx
 
 import (
 	"encoding/binary"
+	"unsafe"
+
+	"github.com/Giulio2002/gdbx/spill"
 )
 
 // put inserts or updates a key-value pair.
@@ -2323,11 +2326,12 @@ func (c *Cursor) touchPageAt(level int) (*page, error) {
 
 		var newData []byte
 		var usedMmap bool
+
 		if c.txn.env.isWriteMap() {
 			// WriteMap mode: try mmap directly (zero allocation)
 			// Note: We intentionally do NOT call extendMmap here. Remapping during a
 			// transaction would invalidate all cached page references, causing crashes.
-			// If the page is beyond mmap bounds, fall back to heap allocation.
+			// If the page is beyond mmap bounds, fall back to spill buffer.
 			newData = c.txn.env.getMmapPageData(newPgno)
 			if newData != nil {
 				copy(newData, origPage.Data)
@@ -2335,11 +2339,16 @@ func (c *Cursor) touchPageAt(level int) (*page, error) {
 			}
 		}
 		if !usedMmap {
-			// Normal mode or mmap out of bounds
-			newData = c.txn.env.getPageDataFromCache()
+			// Use spill buffer (reduces heap pressure)
+			var spillSlot *spill.Slot
+			var err error
+			newData, spillSlot, err = c.txn.env.spillBuf.Allocate()
+			if err != nil {
+				panic("gdbx: spill buffer allocation failed: " + err.Error())
+			}
 			copy(newData, origPage.Data)
-			c.txn.pooledPageData = append(c.txn.pooledPageData, newData)
-			c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
+			// Track spill slot for release after commit/abort
+			c.txn.spillSlots.Set(uint32(newPgno), unsafe.Pointer(spillSlot))
 		}
 
 		newPage := getPooledPageStruct(newData)
@@ -2399,6 +2408,7 @@ func (c *Cursor) allocatePage() (pgno, *page, error) {
 
 	var data []byte
 	var usedMmap bool
+
 	if c.txn.env.isWriteMap() {
 		// WriteMap mode: try to use mmap directly (zero allocation)
 		// Note: No remap during transaction to avoid invalidating page references
@@ -2408,10 +2418,15 @@ func (c *Cursor) allocatePage() (pgno, *page, error) {
 		}
 	}
 	if !usedMmap {
-		// Normal mode or mmap out of bounds: allocate from cache
-		data = c.txn.env.getPageDataFromCache()
-		c.txn.pooledPageData = append(c.txn.pooledPageData, data)
-		c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
+		// Use spill buffer (reduces heap pressure)
+		var spillSlot *spill.Slot
+		var err error
+		data, spillSlot, err = c.txn.env.spillBuf.Allocate()
+		if err != nil {
+			panic("gdbx: spill buffer allocation failed: " + err.Error())
+		}
+		// Track spill slot for release after commit/abort
+		c.txn.spillSlots.Set(uint32(newPgno), unsafe.Pointer(spillSlot))
 	}
 	// Note: No need to clear page - page.init() sets header, and
 	// lower/upper bounds define valid data region. Unwritten areas
@@ -2452,6 +2467,7 @@ func (c *Cursor) allocateOverflow(data []byte) (pgno, error) {
 
 		var pdata []byte
 		var usedMmap bool
+
 		if isWriteMap {
 			// WriteMap mode: try mmap directly
 			pdata = c.txn.env.getMmapPageData(pgno)
@@ -2461,11 +2477,16 @@ func (c *Cursor) allocateOverflow(data []byte) (pgno, error) {
 			}
 		}
 		if !usedMmap {
-			// Normal mode or mmap out of bounds
-			pdata = c.txn.env.getPageDataFromCache()
+			// Use spill buffer (reduces heap pressure)
+			var spillSlot *spill.Slot
+			var err error
+			pdata, spillSlot, err = c.txn.env.spillBuf.Allocate()
+			if err != nil {
+				panic("gdbx: spill buffer allocation failed: " + err.Error())
+			}
 			clear(pdata)
-			c.txn.pooledPageData = append(c.txn.pooledPageData, pdata)
-			c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
+			// Track spill slot for release after commit/abort
+			c.txn.spillSlots.Set(uint32(pgno), unsafe.Pointer(spillSlot))
 		}
 		p := getPooledPageStruct(pdata)
 		c.txn.pooledPageStructs = append(c.txn.pooledPageStructs, p)
