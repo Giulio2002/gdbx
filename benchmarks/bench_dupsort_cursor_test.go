@@ -25,7 +25,7 @@ func setupDupsortDB(b *testing.B, numKeys, numDupVals int) (string, func()) {
 	env, _ := gdbx.NewEnv(gdbx.Default)
 	env.SetMaxDBs(10)
 	env.SetGeometry(-1, -1, 4<<30, -1, -1, 4096)
-	env.Open(dbPath, gdbx.NoSubdir|gdbx.NoMetaSync, 0644)
+	env.Open(dbPath, gdbx.NoSubdir, 0644)
 
 	txn, _ := env.BeginTxn(nil, 0)
 	dbi, _ := txn.OpenDBISimple("dupsort", gdbx.Create|gdbx.DupSort)
@@ -90,15 +90,29 @@ func BenchmarkDupsortNextNoDup_Mdbx(b *testing.B) {
 	dbPath, cleanup := setupDupsortDB(b, 1000, 10000)
 	defer cleanup()
 
-	env, _ := mdbxgo.NewEnv(mdbxgo.Label("test"))
+	env, err := mdbxgo.NewEnv(mdbxgo.Label("test"))
+	if err != nil {
+		b.Fatal(err)
+	}
 	env.SetOption(mdbxgo.OptMaxDB, 10)
-	env.Open(dbPath, mdbxgo.NoSubdir|mdbxgo.Readonly, 0644)
+	if err := env.Open(dbPath, mdbxgo.NoSubdir|mdbxgo.Readonly, 0644); err != nil {
+		b.Fatal(err)
+	}
 	defer env.Close()
 
-	txn, _ := env.BeginTxn(nil, mdbxgo.Readonly)
+	txn, err := env.BeginTxn(nil, mdbxgo.Readonly)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer txn.Abort()
-	dbi, _ := txn.OpenDBI("dupsort", 0, nil, nil)
-	cursor, _ := txn.OpenCursor(dbi)
+	dbi, err := txn.OpenDBI("dupsort", 0, nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	cursor, err := txn.OpenCursor(dbi)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer cursor.Close()
 
 	// Warm up
@@ -207,15 +221,29 @@ func BenchmarkDupsortSetFirstDup_Mdbx(b *testing.B) {
 	env.Close()
 
 	// Benchmark with mdbx-go
-	menv, _ := mdbxgo.NewEnv(mdbxgo.Label("test"))
+	menv, err := mdbxgo.NewEnv(mdbxgo.Label("test"))
+	if err != nil {
+		b.Fatal(err)
+	}
 	menv.SetOption(mdbxgo.OptMaxDB, 10)
-	menv.Open(dbPath, mdbxgo.NoSubdir|mdbxgo.Readonly, 0644)
+	if err := menv.Open(dbPath, mdbxgo.NoSubdir|mdbxgo.Readonly, 0644); err != nil {
+		b.Fatal(err)
+	}
 	defer menv.Close()
 
-	mtxn, _ := menv.BeginTxn(nil, mdbxgo.Readonly)
+	mtxn, err := menv.BeginTxn(nil, mdbxgo.Readonly)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer mtxn.Abort()
-	mdbi, _ := mtxn.OpenDBI("dupsort", 0, nil, nil)
-	mcursor, _ := mtxn.OpenCursor(mdbi)
+	mdbi, err := mtxn.OpenDBI("dupsort", 0, nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	mcursor, err := mtxn.OpenCursor(mdbi)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer mcursor.Close()
 
 	// Warm up
@@ -314,15 +342,29 @@ func BenchmarkDupsortSetLastDup_Mdbx(b *testing.B) {
 	env.Close()
 
 	// Benchmark with mdbx-go
-	menv, _ := mdbxgo.NewEnv(mdbxgo.Label("test"))
+	menv, err := mdbxgo.NewEnv(mdbxgo.Label("test"))
+	if err != nil {
+		b.Fatal(err)
+	}
 	menv.SetOption(mdbxgo.OptMaxDB, 10)
-	menv.Open(dbPath, mdbxgo.NoSubdir|mdbxgo.Readonly, 0644)
+	if err := menv.Open(dbPath, mdbxgo.NoSubdir|mdbxgo.Readonly, 0644); err != nil {
+		b.Fatal(err)
+	}
 	defer menv.Close()
 
-	mtxn, _ := menv.BeginTxn(nil, mdbxgo.Readonly)
+	mtxn, err := menv.BeginTxn(nil, mdbxgo.Readonly)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer mtxn.Abort()
-	mdbi, _ := mtxn.OpenDBI("dupsort", 0, nil, nil)
-	mcursor, _ := mtxn.OpenCursor(mdbi)
+	mdbi, err := mtxn.OpenDBI("dupsort", 0, nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	mcursor, err := mtxn.OpenCursor(mdbi)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer mcursor.Close()
 
 	// Warm up
