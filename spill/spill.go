@@ -1,6 +1,7 @@
 package spill
 
 import (
+	"math"
 	"os"
 	"sync"
 
@@ -11,7 +12,7 @@ import (
 const DefaultInitialCap = 1024
 
 // DefaultMaxSegments is the maximum number of segments (limits total capacity).
-const DefaultMaxSegments = 256
+const DefaultMaxSegments = math.MaxInt32
 
 // segment represents a single mmap'd region of the spill buffer.
 type segment struct {
@@ -27,13 +28,13 @@ type segment struct {
 // rather than Go-allocated heap memory.
 // Uses multiple segments to allow growth without invalidating existing slices.
 type Buffer struct {
-	mu          sync.Mutex
-	basePath    string
-	pageSize    uint32
-	segmentCap  uint32 // Capacity per segment
-	segments    []*segment
-	curSegment  int // Current segment for allocations
-	totalAlloc  uint32
+	mu         sync.Mutex
+	basePath   string
+	pageSize   uint32
+	segmentCap uint32 // Capacity per segment
+	segments   []*segment
+	curSegment int // Current segment for allocations
+	totalAlloc uint32
 }
 
 // Slot represents an allocated slot in the spill buffer.
