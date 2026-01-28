@@ -742,6 +742,7 @@ func (e *Env) beginWriteTxn(parent *Txn, flags uint) (*Txn, error) {
 
 	// Clear dirty page tracker for reuse
 	txn.dirtyTracker.clear()
+	txn.hasNonMmapPages = false
 
 	// Reuse or create free pages slice
 	if txn.freePages == nil {

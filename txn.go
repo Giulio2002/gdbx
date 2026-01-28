@@ -194,9 +194,10 @@ type Txn struct {
 	slotIdx    int
 
 	// Write transaction state
-	dirtyTracker dirtyPageTracker
-	freePages    []pgno
-	allocatedPg  pgno // Next page to allocate
+	dirtyTracker    dirtyPageTracker
+	freePages       []pgno
+	allocatedPg     pgno // Next page to allocate
+	hasNonMmapPages bool // True if any pages were allocated outside mmap (WriteMap mode)
 
 	// Cursor tracking
 	cursors []*Cursor
@@ -470,6 +471,7 @@ func (txn *Txn) abortInternal() error {
 		// Clear dirty page tracker for reuse
 		txn.dirtyTracker.clear()
 		txn.freePages = txn.freePages[:0]
+		txn.hasNonMmapPages = false
 
 		// Return page data to env cache (avoids sync.Pool overhead)
 		txn.env.returnPageDataToCache(txn.pooledPageData)
@@ -1734,34 +1736,11 @@ func (txn *Txn) writeDirtyPages() error {
 	}
 
 	// WriteMap fast path: if all dirty pages are in mmap, nothing to do
+	// Use hasNonMmapPages flag to skip iteration entirely (O(1) instead of O(n))
 	useWriteMap := txn.env.flags&WriteMap != 0 && txn.env.dataMap != nil
-	if useWriteMap {
-		// Check if any pages need copying (allocated outside mmap)
-		mmapData := txn.env.dataMap.data
-		mmapLen := int64(len(mmapData))
-		needsCopy := false
-
-		txn.dirtyTracker.forEach(func(pn pgno, p *page) {
-			if needsCopy {
-				return
-			}
-			offset := int64(pn) * pageSize
-			end := offset + int64(len(p.Data))
-			if end > mmapLen {
-				needsCopy = true
-				return
-			}
-			// Check if p.Data is NOT in mmap (different backing array)
-			mmapSlice := mmapData[offset:end]
-			if &p.Data[0] != &mmapSlice[0] {
-				needsCopy = true
-			}
-		})
-
-		// Fast path: all pages are in mmap, nothing to write
-		if !needsCopy {
-			return nil
-		}
+	if useWriteMap && !txn.hasNonMmapPages {
+		// All pages are in mmap, nothing to write - skip iteration entirely
+		return nil
 	}
 
 	// Write dirty pages that need writing

@@ -1526,7 +1526,13 @@ func (c *Cursor) splitAndInsert(p *page, idx int, nodeData []byte, overflowPgno 
 
 	// Insert the new node in the appropriate page
 	// Special case: when splitIdx=0, new node goes to left page alone (all existing went right)
-	if splitIdx == 0 || idx < splitIdx {
+	// IMPORTANT: When splitIdx=0, the old page is now EMPTY, so we must insert at index 0
+	if splitIdx == 0 {
+		if !p.insertEntryWithBuf(0, nodeData, c.txn.compactBuf[:]) {
+			// Shouldn't happen after split - page is empty
+			return NewError(ErrPageFull)
+		}
+	} else if idx < splitIdx {
 		if !p.insertEntryWithBuf(idx, nodeData, c.txn.compactBuf[:]) {
 			// Shouldn't happen after split
 			return NewError(ErrPageFull)
@@ -2029,6 +2035,7 @@ func (c *Cursor) touchSubTreePath() (*page, error) {
 			newData = c.txn.env.getPageDataFromCache()
 			copy(newData, origPage.Data)
 			c.txn.pooledPageData = append(c.txn.pooledPageData, newData)
+			c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
 		}
 
 		newPage := getPooledPageStruct(newData)
@@ -2332,6 +2339,7 @@ func (c *Cursor) touchPageAt(level int) (*page, error) {
 			newData = c.txn.env.getPageDataFromCache()
 			copy(newData, origPage.Data)
 			c.txn.pooledPageData = append(c.txn.pooledPageData, newData)
+			c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
 		}
 
 		newPage := getPooledPageStruct(newData)
@@ -2403,6 +2411,7 @@ func (c *Cursor) allocatePage() (pgno, *page, error) {
 		// Normal mode or mmap out of bounds: allocate from cache
 		data = c.txn.env.getPageDataFromCache()
 		c.txn.pooledPageData = append(c.txn.pooledPageData, data)
+		c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
 	}
 	// Note: No need to clear page - page.init() sets header, and
 	// lower/upper bounds define valid data region. Unwritten areas
@@ -2456,6 +2465,7 @@ func (c *Cursor) allocateOverflow(data []byte) (pgno, error) {
 			pdata = c.txn.env.getPageDataFromCache()
 			clear(pdata)
 			c.txn.pooledPageData = append(c.txn.pooledPageData, pdata)
+			c.txn.hasNonMmapPages = true // Track that we have pages outside mmap
 		}
 		p := getPooledPageStruct(pdata)
 		c.txn.pooledPageStructs = append(c.txn.pooledPageStructs, p)
