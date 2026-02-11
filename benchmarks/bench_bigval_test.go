@@ -1,3 +1,5 @@
+//go:build rocksdb
+
 package benchmarks
 
 import (
@@ -99,12 +101,12 @@ func formatBigValSize(n int) string {
 // ============ Big Value Cache ============
 
 var (
-	bigValMu      sync.Mutex
-	bigGdbxEnvs   = make(map[string]*gdbx.Env)
-	bigMdbxEnvs   = make(map[string]*mdbxgo.Env)
-	bigBoltDBs    = make(map[string]*bolt.DB)
-	bigRocksDBs   = make(map[string]*gorocksdb.DB)
-	bigValCache   = make(map[string][]byte) // Shared big value for writes
+	bigValMu    sync.Mutex
+	bigGdbxEnvs = make(map[string]*gdbx.Env)
+	bigMdbxEnvs = make(map[string]*mdbxgo.Env)
+	bigBoltDBs  = make(map[string]*bolt.DB)
+	bigRocksDBs = make(map[string]*gorocksdb.DB)
+	bigValCache = make(map[string][]byte) // Shared big value for writes
 )
 
 func getCachedBigValDB(b *testing.B, size int) (*gdbx.Env, *mdbxgo.Env, *bolt.DB, *gorocksdb.DB, []byte) {

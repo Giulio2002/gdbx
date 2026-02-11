@@ -1,3 +1,5 @@
+//go:build rocksdb
+
 package benchmarks
 
 import (
@@ -67,12 +69,12 @@ func formatLongSize(n int) string {
 // ============ Long Key Cache ============
 
 var (
-	longKeyMu      sync.Mutex
-	longGdbxEnvs   = make(map[string]*gdbx.Env)
-	longMdbxEnvs   = make(map[string]*mdbxgo.Env)
-	longBoltDBs    = make(map[string]*bolt.DB)
-	longRocksDBs   = make(map[string]*gorocksdb.DB)
-	longKeyCache   = make(map[string][][]byte) // Pre-generated 64-byte keys
+	longKeyMu    sync.Mutex
+	longGdbxEnvs = make(map[string]*gdbx.Env)
+	longMdbxEnvs = make(map[string]*mdbxgo.Env)
+	longBoltDBs  = make(map[string]*bolt.DB)
+	longRocksDBs = make(map[string]*gorocksdb.DB)
+	longKeyCache = make(map[string][][]byte) // Pre-generated 64-byte keys
 )
 
 func getCachedLongKeyDB(b *testing.B, size int) (*gdbx.Env, *mdbxgo.Env, *bolt.DB, *gorocksdb.DB, [][]byte) {
